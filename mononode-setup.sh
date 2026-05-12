@@ -125,6 +125,7 @@ if ! step_done "proxmox-installed"; then
   fi
 
   run_with_retry "apt update (proxmox)" apt update
+  beeshost_fix_proxmox_hostname_resolution || true
   run_with_retry "Install Proxmox" \
     DEBIAN_FRONTEND=noninteractive apt install -y proxmox-ve postfix open-iscsi
 
@@ -155,6 +156,10 @@ if [ -f /etc/beeshost/proxmox-api-token.env ]; then
 fi
 set +a
 THIS_IP=$(curl -s https://api.ipify.org)
+
+beeshost_fix_proxmox_hostname_resolution || true
+ensure_proxmox_web_port_open
+beeshost_ensure_proxmox_single_node_cluster || true
 
 # Proxmox API token
 section "Configure Proxmox API token"
@@ -405,7 +410,7 @@ if ! step_done "firewall-configured"; then
   setup_ufw_base
   ufw allow 80/tcp comment "HTTP"
   ufw allow 443/tcp comment "HTTPS"
-  ufw allow 8006/tcp comment "Proxmox"
+  # Port 8006 (Proxmox) opened earlier via ensure_proxmox_web_port_open
   ufw allow 53/tcp comment "DNS TCP"
   ufw allow 53/udp comment "DNS UDP"
   ufw allow 25/tcp comment "SMTP"
@@ -489,6 +494,10 @@ section "Verify services"
 sleep 2
 
 for service in "${!ALL_SERVICE_DESCRIPTIONS[@]}"; do
+  if [ ! -f "/etc/systemd/system/beeshost-${service}.service" ]; then
+    skip "beeshost-${service}: no systemd unit (library or multi-package repo)"
+    continue
+  fi
   if systemctl is-active --quiet "beeshost-${service}" 2>/dev/null; then
     ok "beeshost-${service} running"
   else

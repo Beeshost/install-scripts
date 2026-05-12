@@ -363,7 +363,46 @@ setup_git() {
   fi
 }
 
-# Clone single repo with npm install + build
+# Every directory under root_dir that contains package.json (excluding dependency
+# trees and local tooling dirs). Installs devDependencies, runs prisma generate when
+# applicable, then npm run build. Used for monorepo-style repos (e.g. dns/*) with no
+# root package.json as well as single-package services.
+beeshost_npm_install_build_tree() {
+  local root_dir=$1
+  local repo_label=${2:-repo}
+
+  if [ ! -d "$root_dir" ]; then
+    warn "beeshost_npm_install_build_tree: not a directory: $root_dir"
+    return 1
+  fi
+
+  local pkg rel_dir dir
+  while IFS= read -r -d '' pkg; do
+    dir=$(dirname "$pkg")
+    if [ "$dir" = "$root_dir" ]; then
+      rel_dir="$repo_label"
+    else
+      rel_dir="$repo_label/${dir#$root_dir/}"
+    fi
+
+    cd "$dir" || return 1
+    run_with_retry "npm install --include=dev ($rel_dir)" npm install --include=dev || return 1
+
+    if [ -f prisma/schema.prisma ] && grep -q '"generate"' package.json; then
+      run_with_retry "npm run generate ($rel_dir)" npm run generate || return 1
+    fi
+
+    if grep -q '"build"' package.json; then
+      run_with_retry "npm run build ($rel_dir)" npm run build || return 1
+    fi
+  done < <(find "$root_dir" \
+    \( -path "*/node_modules/*" -o -path "*/.git/*" -o -path "*/tmp/*" -o -path "*/.continue/*" \) -prune -o \
+    -name package.json -print0)
+
+  return 0
+}
+
+# Clone single repo with npm install + build (all nested Node packages)
 clone_repo() {
   local repo=$1
   local dest=${2:-/opt/beeshost/$repo}
@@ -376,11 +415,9 @@ clone_repo() {
       "git clone https://github.com/Beeshost/${repo}.git $dest"
   fi
 
-  cd "$dest"
-  run_with_retry "npm install $repo" npm install
-  if [ -f "package.json" ] && grep -q '"build"' package.json; then
-    run_with_retry "npm build $repo" npm run build
-  fi
+  # Install devDependencies everywhere (tsc, prisma CLI, vitest, etc.). NODE_ENV=production
+  # from env files would otherwise omit devDependencies and break builds.
+  beeshost_npm_install_build_tree "$dest" "$repo"
 }
 
 # Write systemd service
@@ -388,6 +425,19 @@ write_service() {
   local name=$1
   local dir=$2
   local description=$3
+
+  if [ ! -f "${dir}/dist/index.js" ]; then
+    if [ -f "/etc/systemd/system/beeshost-${name}.service" ]; then
+      warn "Removing stale beeshost-${name}.service — no ${dir}/dist/index.js (multi-package or library repo)"
+      systemctl stop "beeshost-${name}" 2>/dev/null || true
+      systemctl disable "beeshost-${name}" 2>/dev/null || true
+      rm -f "/etc/systemd/system/beeshost-${name}.service"
+      systemctl daemon-reload
+    else
+      skip "beeshost-${name}: no ${dir}/dist/index.js (library or multi-package repo) — skipping systemd unit"
+    fi
+    return 0
+  fi
 
   cat > "/etc/systemd/system/beeshost-${name}.service" << EOF
 [Unit]
@@ -414,7 +464,103 @@ EOF
   run_with_retry "Start beeshost-${name}" systemctl start "beeshost-${name}"
 }
 
+# Proxmox pmxcfs requires the local hostname to resolve to a non-loopback IP.
+# Debian's default "127.0.1.1 hostname" breaks pve-cluster; many VPS hostnames have no public DNS.
+beeshost_fix_proxmox_hostname_resolution() {
+  local short fq ip line
+  short=$(hostname -s)
+  fq=$(hostname -f 2>/dev/null || echo "$short")
+  ip=$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") { print $(i+1); exit } }')
+  if [ -z "$ip" ]; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  if [ -z "$ip" ] || [ "$ip" = "127.0.0.1" ]; then
+    warn "Could not detect primary IPv4 for Proxmox /etc/hosts fix (skipping)"
+    return 1
+  fi
+
+  if [ -f /etc/hosts ] && grep -q "127.0.1.1" /etc/hosts 2>/dev/null && grep "127.0.1.1" /etc/hosts | grep -qF "$short"; then
+    sed -i "/127\.0\.1\.1.*${short}/d" /etc/hosts
+    ok "Removed 127.0.1.1 entry for ${short} (required for Proxmox pmxcfs)"
+  fi
+
+  if [ "$fq" != "$short" ]; then
+    line="$ip $fq $short"
+  else
+    line="$ip $short"
+  fi
+  if grep -qF "$line" /etc/hosts 2>/dev/null; then
+    return 0
+  fi
+  echo "$line" >> /etc/hosts
+  ok "Added /etc/hosts: $line (Proxmox cluster filesystem)"
+}
+
 # UFW base rules (shared)
+# Proxmox UI must be reachable in the browser before later "Configure firewall" runs — open 8006 early.
+ensure_proxmox_web_port_open() {
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw allow 8006/tcp comment "Proxmox web UI" 2>/dev/null || true
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    info "UFW active — ensured port 8006/tcp is allowed for Proxmox"
+    ufw reload 2>/dev/null || true
+  fi
+}
+
+# After a clean install, pmxcfs can run but /etc/pve/local/ and TLS only appear once a
+# one-node cluster exists (corosync.conf). Headless installs never open the web wizard, so
+# create the cluster here. See cursor_installation_style_for_auto_inst.md (Proxmox section).
+# Skips if already clustered. Do not use on nodes that join an existing cluster (they already
+# have /etc/pve/corosync.conf).
+beeshost_ensure_proxmox_single_node_cluster() {
+  command -v pvecm >/dev/null 2>&1 || return 0
+
+  if [ -f /etc/pve/corosync.conf ]; then
+    info "Proxmox cluster already configured — skipping pvecm create"
+    return 0
+  fi
+
+  if pvecm status >/dev/null 2>&1; then
+    info "pvecm status OK — skipping pvecm create"
+    return 0
+  fi
+
+  local bind_ip
+  bind_ip=$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") { print $(i+1); exit } }')
+  if [ -z "$bind_ip" ] || [ "$bind_ip" = "127.0.0.1" ]; then
+    bind_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  if [ -z "$bind_ip" ] || [ "$bind_ip" = "127.0.0.1" ]; then
+    warn "beeshost_ensure_proxmox_single_node_cluster: could not detect bind IP — skipping pvecm create"
+    return 0
+  fi
+
+  systemctl reset-failed pve-cluster 2>/dev/null || true
+  systemctl start pve-cluster 2>/dev/null || true
+  sleep 2
+
+  info "Creating single-node Proxmox cluster (name: beeshost-pve, link0: ${bind_ip})"
+  if pvecm create beeshost-pve --link0 "$bind_ip" >>"$LOG_FILE" 2>&1; then
+    ok "Proxmox single-node cluster created (beeshost-pve)"
+  elif pvecm create beeshost-pve >>"$LOG_FILE" 2>&1; then
+    ok "Proxmox single-node cluster created (beeshost-pve, default link)"
+  else
+    if [ -f /etc/pve/corosync.conf ]; then
+      ok "Proxmox cluster config present after pvecm create"
+    else
+      warn "pvecm create did not produce /etc/pve/corosync.conf — finish cluster setup in the Proxmox UI if needed"
+      warn "Check: journalctl -u pve-cluster -n 40 --no-pager"
+      return 0
+    fi
+  fi
+
+  systemctl enable corosync 2>/dev/null || true
+  systemctl start corosync 2>/dev/null || true
+  systemctl restart pve-cluster 2>/dev/null || true
+  sleep 2
+  return 0
+}
+
 setup_ufw_base() {
   ufw default deny incoming
   ufw default allow outgoing

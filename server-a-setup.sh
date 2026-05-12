@@ -352,6 +352,10 @@ section "Verify services"
 sleep 3  # Give services time to start
 
 for service in "${!SERVICE_DESCRIPTIONS[@]}"; do
+  if [ ! -f "/etc/systemd/system/beeshost-${service}.service" ]; then
+    skip "beeshost-${service}: no systemd unit (library or multi-package repo)"
+    continue
+  fi
   if systemctl is-active --quiet "beeshost-${service}" 2>/dev/null; then
     ok "beeshost-${service} is running"
     STEPS_OK+=("beeshost-${service}")

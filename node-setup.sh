@@ -86,6 +86,7 @@ if ! step_done "proxmox-installed"; then
   fi
 
   run_with_retry "apt update (proxmox)" apt update
+  beeshost_fix_proxmox_hostname_resolution || true
   run_with_retry "Install Proxmox VE" \
     DEBIAN_FRONTEND=noninteractive apt install -y proxmox-ve postfix open-iscsi
 
@@ -124,6 +125,10 @@ if [ -f /etc/beeshost/node-daemon-inputs.env ]; then
   set +a
 fi
 THIS_IP=$(curl -s https://api.ipify.org)
+
+beeshost_fix_proxmox_hostname_resolution || true
+ensure_proxmox_web_port_open
+beeshost_ensure_proxmox_single_node_cluster || true
 
 # Configure Proxmox API token
 section "Configure Proxmox API token"
@@ -216,7 +221,7 @@ fi
 section "Configure firewall"
 if ! step_done "firewall-configured"; then
   setup_ufw_base
-  ufw allow 8006/tcp comment "Proxmox web UI"
+  # Port 8006 (Proxmox) was opened before the API token step via ensure_proxmox_web_port_open
   ufw allow from "${SERVER_A_IP}" to any port "${DAEMON_PORT}" comment "BeesHost daemon"
   
   # Block common mining pools
