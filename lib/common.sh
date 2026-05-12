@@ -85,6 +85,11 @@ confirm() {
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# True when we should ask before retrying (TTY stdin and not forced non-interactive).
+beeshost_retry_prompt_ok() {
+  [ -t 0 ] && [ "${BEESHOST_NONINTERACTIVE:-}" != "1" ]
+}
+
 # Run command with retry
 # Usage: run_with_retry "description" command [args...]
 run_with_retry() {
@@ -93,27 +98,46 @@ run_with_retry() {
   local cmd="$@"
   local max_attempts=3
   local attempt=1
+  local rc
 
   while [ $attempt -le $max_attempts ]; do
-    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
+    rc=0
+    # Builds/prisma were only visible in $LOG_FILE; mirror them to the console too.
+    if [[ "$description" == *"npm run build"* ]] || [[ "$description" == *"prisma generate"* ]] || [[ "$description" == *"npm run generate"* ]]; then
+      set -o pipefail
+      eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
+      rc=${PIPESTATUS[0]}
+      set +o pipefail
+    else
+      if eval "$cmd" >>"$LOG_FILE" 2>&1; then
+        rc=0
+      else
+        rc=$?
+      fi
+    fi
+
+    if [ "$rc" -eq 0 ]; then
       ok "$description"
       STEPS_OK+=("$description")
       return 0
-    else
-      if [ $attempt -lt $max_attempts ]; then
-        warn "$description failed (attempt $attempt/$max_attempts)"
-        if confirm "Retry?"; then
-          attempt=$((attempt + 1))
-        else
-          fail "$description — skipped after $attempt attempts"
-          STEPS_FAILED+=("$description")
-          return 1
-        fi
-      else
-        fail "$description — failed after $max_attempts attempts"
+    fi
+
+    if [ $attempt -lt $max_attempts ]; then
+      warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
+      if beeshost_retry_prompt_ok && confirm "Retry?"; then
+        attempt=$((attempt + 1))
+      elif beeshost_retry_prompt_ok; then
+        fail "$description — skipped after $attempt attempts"
         STEPS_FAILED+=("$description")
         return 1
+      else
+        attempt=$((attempt + 1))
+        sleep "${BEESHOST_RETRY_SLEEP_SECONDS:-2}"
       fi
+    else
+      fail "$description — failed after $max_attempts attempts"
+      STEPS_FAILED+=("$description")
+      return 1
     fi
   done
 }
@@ -128,8 +152,10 @@ run_with_retry_streaming() {
   local rc
 
   while [ $attempt -le $max_attempts ]; do
+    set -o pipefail
     "$@" 2>&1 | tee -a "$LOG_FILE"
     rc=${PIPESTATUS[0]}
+    set +o pipefail
     if [ "$rc" -eq 0 ]; then
       ok "$description"
       STEPS_OK+=("$description")
@@ -137,12 +163,15 @@ run_with_retry_streaming() {
     fi
     if [ $attempt -lt $max_attempts ]; then
       warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
-      if confirm "Retry?"; then
+      if beeshost_retry_prompt_ok && confirm "Retry?"; then
         attempt=$((attempt + 1))
-      else
+      elif beeshost_retry_prompt_ok; then
         fail "$description — skipped after $attempt attempts"
         STEPS_FAILED+=("$description")
         return 1
+      else
+        attempt=$((attempt + 1))
+        sleep "${BEESHOST_RETRY_SLEEP_SECONDS:-2}"
       fi
     else
       fail "$description — failed after $max_attempts attempts"
@@ -241,12 +270,15 @@ beeshost_apt_with_progress_retry() {
     rc=$?
     if [ $attempt -lt $max_attempts ]; then
       warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
-      if confirm "Retry?"; then
+      if beeshost_retry_prompt_ok && confirm "Retry?"; then
         attempt=$((attempt + 1))
-      else
+      elif beeshost_retry_prompt_ok; then
         fail "$description — skipped after $attempt attempts"
         STEPS_FAILED+=("$description")
         return 1
+      else
+        attempt=$((attempt + 1))
+        sleep "${BEESHOST_RETRY_SLEEP_SECONDS:-2}"
       fi
     else
       fail "$description — failed after $max_attempts attempts"
