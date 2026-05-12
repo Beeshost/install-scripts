@@ -118,6 +118,144 @@ run_with_retry() {
   done
 }
 
+# Same as run_with_retry but streams stdout/stderr to the terminal and the log. Use for
+# very long apt installs (e.g. proxmox-ve) that otherwise show no output for 30–60+ minutes.
+run_with_retry_streaming() {
+  local description=$1
+  shift 1
+  local max_attempts=3
+  local attempt=1
+  local rc
+
+  while [ $attempt -le $max_attempts ]; do
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -eq 0 ]; then
+      ok "$description"
+      STEPS_OK+=("$description")
+      return 0
+    fi
+    if [ $attempt -lt $max_attempts ]; then
+      warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
+      if confirm "Retry?"; then
+        attempt=$((attempt + 1))
+      else
+        fail "$description — skipped after $attempt attempts"
+        STEPS_FAILED+=("$description")
+        return 1
+      fi
+    else
+      fail "$description — failed after $max_attempts attempts"
+      STEPS_FAILED+=("$description")
+      return 1
+    fi
+  done
+}
+
+# Rough apt progress: estimate total archive lines from a simulate --print-uris pass, then
+# show ~% from live "Get:" lines (install/upgrade). For "update", streams output only (no %).
+beeshost_apt_with_progress() {
+  local desc=$1
+  local mode=$2
+  shift 2
+  local total=1
+  local rc=0
+
+  case "$mode" in
+    update)
+      info "$desc — running (apt update has no reliable total; watch lines below)"
+      (
+        set -o pipefail
+        LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | tee -a "$LOG_FILE"
+        exit "${PIPESTATUS[0]}"
+      ) || rc=$?
+      ;;
+    upgrade)
+      total=$(LC_ALL=C apt-get -y -s upgrade --print-uris 2>/dev/null | grep -cE "^'https?://" || true)
+      [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -ge 1 ] || total=80
+      info "$desc — ~${total} archive fetch(es) expected; percent is approximate"
+      (
+        set -o pipefail
+        LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -y upgrade 2>&1 \
+          | tee -a "$LOG_FILE" \
+          | awk -v desc="$desc" -v total="$total" '
+              { print; fflush() }
+              /^Get:[[:space:]]+[0-9]+/ {
+                n++; pct=int(n * 100 / total); if (pct > 99) pct = 99
+                printf("\r\033[0;34m[\033[0;34m INFO \033[0m]\033[0m %s: ~%d%%\033[K", desc, pct) > "/dev/stderr"
+                fflush("/dev/stderr")
+              }
+              END { printf("\n") > "/dev/stderr" }
+            '
+        exit "${PIPESTATUS[0]}"
+      ) || rc=$?
+      ;;
+    install)
+      total=$(LC_ALL=C apt-get -y -s install --print-uris "$@" 2>/dev/null | grep -cE "^'https?://" || true)
+      [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -ge 1 ] || total=80
+      info "$desc — ~${total} archive fetch(es) expected; percent is approximate"
+      (
+        set -o pipefail
+        LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -y install "$@" 2>&1 \
+          | tee -a "$LOG_FILE" \
+          | awk -v desc="$desc" -v total="$total" '
+              { print; fflush() }
+              /^Get:[[:space:]]+[0-9]+/ {
+                n++; pct=int(n * 100 / total); if (pct > 99) pct = 99
+                printf("\r\033[0;34m[\033[0;34m INFO \033[0m]\033[0m %s: ~%d%%\033[K", desc, pct) > "/dev/stderr"
+                fflush("/dev/stderr")
+              }
+              END { printf("\n") > "/dev/stderr" }
+            '
+        exit "${PIPESTATUS[0]}"
+      ) || rc=$?
+      ;;
+    *)
+      fail "beeshost_apt_with_progress: unknown mode '$mode' (use update|upgrade|install)"
+      return 1
+      ;;
+  esac
+
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  if [ "$mode" != "update" ]; then
+    printf '\r\033[0;34m[\033[0;34m INFO \033[0m]\033[0m %s: 100%%\033[K\n' "$desc" >&2
+  fi
+  STEPS_OK+=("$desc")
+  ok "$desc"
+  return 0
+}
+
+beeshost_apt_with_progress_retry() {
+  local description=$1
+  shift
+  local max_attempts=3
+  local attempt=1
+  local rc
+
+  while [ $attempt -le $max_attempts ]; do
+    if beeshost_apt_with_progress "$description" "$@"; then
+      return 0
+    fi
+    rc=$?
+    if [ $attempt -lt $max_attempts ]; then
+      warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
+      if confirm "Retry?"; then
+        attempt=$((attempt + 1))
+      else
+        fail "$description — skipped after $attempt attempts"
+        STEPS_FAILED+=("$description")
+        return 1
+      fi
+    else
+      fail "$description — failed after $max_attempts attempts"
+      STEPS_FAILED+=("$description")
+      return 1
+    fi
+  done
+}
+
 # Check resume state
 step_done() {
   local step=$1
@@ -308,10 +446,9 @@ system_update() {
     return
   fi
 
-  run_with_retry "apt update" apt update
-  run_with_retry "apt upgrade" apt upgrade -y
-  run_with_retry "Install base packages" \
-    apt install -y curl wget git build-essential ufw fail2ban \
+  beeshost_apt_with_progress_retry "apt update" update
+  beeshost_apt_with_progress_retry "apt upgrade" upgrade
+  beeshost_apt_with_progress_retry "Install base packages" install curl wget git build-essential ufw fail2ban \
                    nginx software-properties-common unzip certbot \
                    python3-certbot-nginx
 
@@ -328,7 +465,7 @@ install_nodejs() {
 
   run_with_retry "Add NodeSource repo" \
     "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -"
-  run_with_retry "Install Node.js" apt install -y nodejs
+  beeshost_apt_with_progress_retry "Install Node.js" install nodejs
   run_with_retry "Install PM2" npm install -g pm2
 
   node --version | tee -a "$LOG_FILE"
@@ -409,15 +546,27 @@ clone_repo() {
 
   if [ -d "$dest" ]; then
     info "Pulling latest: $repo"
-    cd "$dest" && git pull >> "$LOG_FILE" 2>&1
+    if ! ( cd "$dest" && git pull >>"$LOG_FILE" 2>&1 ); then
+      fail "Git pull failed for $repo ($dest) — see $LOG_FILE"
+      return 1
+    fi
   else
-    run_with_retry "Clone $repo" \
-      "git clone https://github.com/Beeshost/${repo}.git $dest"
+    run_with_retry "Git clone: $repo (github.com/Beeshost/${repo}.git)" \
+      "git clone https://github.com/Beeshost/${repo}.git $dest" || return 1
+  fi
+
+  # Orchestrator imports expect ../Postgres while the repo is cloned as "postgres" (case).
+  if [ "$repo" = "postgres" ]; then
+    ln -sfn "$dest" "$(dirname "$dest")/Postgres"
+    ok "Symlink $(dirname "$dest")/Postgres → $repo (for Orchestrator tsc paths)"
   fi
 
   # Install devDependencies everywhere (tsc, prisma CLI, vitest, etc.). NODE_ENV=production
   # from env files would otherwise omit devDependencies and break builds.
-  beeshost_npm_install_build_tree "$dest" "$repo"
+  if ! beeshost_npm_install_build_tree "$dest" "$repo"; then
+    fail "npm install/build failed under $dest — see $LOG_FILE"
+    return 1
+  fi
 }
 
 # Write systemd service

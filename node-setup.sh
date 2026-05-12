@@ -85,10 +85,10 @@ if ! step_done "proxmox-installed"; then
     STEPS_FAILED+=("Proxmox GPG key")
   fi
 
-  run_with_retry "apt update (proxmox)" apt update
+  beeshost_apt_with_progress_retry "apt update (proxmox)" update
   beeshost_fix_proxmox_hostname_resolution || true
-  run_with_retry "Install Proxmox VE" \
-    DEBIAN_FRONTEND=noninteractive apt install -y proxmox-ve postfix open-iscsi
+  info "Installing proxmox-ve (large metapackage; percent is approximate)"
+  beeshost_apt_with_progress_retry "Install Proxmox VE" install proxmox-ve postfix open-iscsi
 
   mark_step_done "proxmox-installed"
   STEPS_OK+=("Proxmox installed")
@@ -169,8 +169,8 @@ section "Clone repositories"
 mkdir -p /opt/beeshost
 
 if ! step_done "repos-cloned"; then
-  clone_repo "proxmox-wrapper"
-  clone_repo "proxmox-daemon"
+  clone_repo "proxmox-wrapper" || exit 1
+  clone_repo "proxmox-daemon" || exit 1
   mark_step_done "repos-cloned"
 fi
 

@@ -58,7 +58,7 @@ prompt ADMIN_EMAIL "Admin email address"
 # Install PostgreSQL
 section "Install PostgreSQL"
 if ! step_done "postgresql"; then
-  run_with_retry "Install PostgreSQL" apt install -y postgresql postgresql-contrib
+  beeshost_apt_with_progress_retry "Install PostgreSQL" install postgresql postgresql-contrib
   systemctl enable postgresql && systemctl start postgresql
 
   # Create user and database (suppress errors if already exist)
@@ -116,8 +116,8 @@ if ! step_done "powerdns"; then
     "echo 'deb [signed-by=/usr/share/keyrings/powerdns-repo.gpg.key] http://repo.powerdns.com/ubuntu focal-auth-48 main' > /etc/apt/sources.list.d/powerdns.list"
   
   if curl -s https://repo.powerdns.com/FD380FBB-pub.asc | gpg --dearmor > /usr/share/keyrings/powerdns-repo.gpg.key; then
-    run_with_retry "apt update (powerdns)" apt update
-    run_with_retry "Install PowerDNS" apt install -y pdns-server pdns-backend-postgresql
+    beeshost_apt_with_progress_retry "apt update (powerdns)" update
+    beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-postgresql
   fi
 
   ok "PowerDNS installed"
@@ -127,8 +127,8 @@ fi
 # Install mail stack
 section "Install mail stack"
 if ! step_done "mailstack"; then
-  run_with_retry "Install Postfix" apt install -y postfix
-  run_with_retry "Install Dovecot" apt install -y dovecot-core dovecot-imapd
+  beeshost_apt_with_progress_retry "Install Postfix" install postfix
+  beeshost_apt_with_progress_retry "Install Dovecot" install dovecot-core dovecot-imapd
   ok "Mail stack base installed"
   mark_step_done "mailstack"
 fi
@@ -137,28 +137,29 @@ fi
 section "Clone all repositories"
 mkdir -p /opt/beeshost
 
+# Orchestrator must be cloned after sibling packages it type-checks against (see clone_repo).
 REPOS=(
   "postgres"
+  "crash-handler"
+  "tickets"
+  "vuln-scanner"
+  "env-manager"
+  "log-viewer"
+  "dns"
   "orchestrator"
   "abusemonitor"
   "backup"
-  "crash-handler"
   "deployment-health"
-  "dns"
-  "env-manager"
-  "log-viewer"
   "mailproxy"
   "nodejs-version-alerts"
-  "tickets"
   "upgrade-suggestions"
-  "vuln-scanner"
   "beepanel"
   "webmail"
 )
 
 if ! step_done "repos-cloned"; then
   for repo in "${REPOS[@]}"; do
-    clone_repo "$repo"
+    clone_repo "$repo" || exit 1
   done
   mark_step_done "repos-cloned"
 fi

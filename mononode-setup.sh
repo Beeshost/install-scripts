@@ -102,7 +102,7 @@ write_defaults /etc/beeshost/mononode.env
 # PostgreSQL
 section "Install PostgreSQL"
 if ! step_done "postgresql"; then
-  run_with_retry "Install PostgreSQL" apt install -y postgresql postgresql-contrib
+  beeshost_apt_with_progress_retry "Install PostgreSQL" install postgresql postgresql-contrib
   systemctl enable postgresql && systemctl start postgresql
 
   sudo -u postgres psql -c "CREATE USER beeshost WITH PASSWORD '${DB_PASSWORD}';" 2>/dev/null || true
@@ -124,10 +124,10 @@ if ! step_done "proxmox-installed"; then
     ok "Proxmox GPG key added"
   fi
 
-  run_with_retry "apt update (proxmox)" apt update
+  beeshost_apt_with_progress_retry "apt update (proxmox)" update
   beeshost_fix_proxmox_hostname_resolution || true
-  run_with_retry "Install Proxmox" \
-    DEBIAN_FRONTEND=noninteractive apt install -y proxmox-ve postfix open-iscsi
+  info "Installing proxmox-ve (large metapackage; percent is approximate)"
+  beeshost_apt_with_progress_retry "Install Proxmox" install proxmox-ve postfix open-iscsi
 
   mark_step_done "proxmox-installed"
   STEPS_OK+=("Proxmox VE installed")
@@ -198,31 +198,33 @@ fi
 section "Clone all repositories"
 mkdir -p /opt/beeshost
 
+# Order matters: Orchestrator tsc follows ../../Postgres, ../../tickets, etc. — those repos
+# must exist before orchestrator. Symlink Postgres→postgres is created in clone_repo.
 ALL_REPOS=(
   "postgres"
   "proxmox-wrapper"
   "proxmox-daemon"
+  "crash-handler"
+  "tickets"
+  "vuln-scanner"
+  "env-manager"
+  "log-viewer"
+  "dns"
   "orchestrator"
   "abusemonitor"
   "backup"
-  "crash-handler"
   "deployment-health"
-  "dns"
-  "env-manager"
-  "log-viewer"
   "mailproxy"
   "mailserver"
   "nodejs-version-alerts"
-  "tickets"
   "upgrade-suggestions"
-  "vuln-scanner"
   "beepanel"
   "webmail"
 )
 
 if ! step_done "repos-cloned"; then
   for repo in "${ALL_REPOS[@]}"; do
-    clone_repo "$repo"
+    clone_repo "$repo" || exit 1
   done
   mark_step_done "repos-cloned"
 fi
@@ -249,8 +251,8 @@ if ! step_done "powerdns"; then
     "echo 'deb [signed-by=/usr/share/keyrings/powerdns-repo.gpg.key] http://repo.powerdns.com/ubuntu focal-auth-48 main' > /etc/apt/sources.list.d/powerdns.list"
 
   if curl -s https://repo.powerdns.com/FD380FBB-pub.asc | gpg --dearmor > /usr/share/keyrings/powerdns-repo.gpg.key; then
-    run_with_retry "apt update (powerdns)" apt update
-    run_with_retry "Install PowerDNS" apt install -y pdns-server pdns-backend-postgresql
+    beeshost_apt_with_progress_retry "apt update (powerdns)" update
+    beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-postgresql
   fi
 
   ok "PowerDNS configured"
@@ -260,8 +262,8 @@ fi
 # Mail stack
 section "Install mail stack"
 if ! step_done "mailstack"; then
-  run_with_retry "Install Postfix" apt install -y postfix
-  run_with_retry "Install Dovecot" apt install -y dovecot-core dovecot-imapd
+  beeshost_apt_with_progress_retry "Install Postfix" install postfix
+  beeshost_apt_with_progress_retry "Install Dovecot" install dovecot-core dovecot-imapd
   ok "Mail stack installed"
   mark_step_done "mailstack"
 fi
