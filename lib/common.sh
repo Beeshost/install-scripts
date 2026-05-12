@@ -73,11 +73,12 @@ confirm() {
 }
 
 # Run command with retry
+# Usage: run_with_retry "description" command [args...]
 run_with_retry() {
   local description=$1
-  local max_attempts=${2:-3}
-  shift 2
+  shift 1
   local cmd="$@"
+  local max_attempts=3
   local attempt=1
 
   while [ $attempt -le $max_attempts ]; do
