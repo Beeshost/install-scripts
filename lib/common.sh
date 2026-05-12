@@ -539,6 +539,65 @@ beeshost_npm_install_build_tree() {
   return 0
 }
 
+# Update an existing clone: fetch, fast-forward if possible, else hard-reset to origin
+# (typical /opt/beeshost installs should match GitHub; local edits on the node are discarded).
+# GIT_TERMINAL_PROMPT=0 avoids hanging on credential prompts when no TTY.
+beeshost_git_sync_repo() {
+  local dest=$1
+  local repo=$2
+  local log="${LOG_FILE:-/dev/null}"
+
+  export GIT_TERMINAL_PROMPT=0
+
+  if [ ! -d "$dest/.git" ]; then
+    echo "beeshost_git_sync_repo: not a git clone (no .git): $dest" >>"$log"
+    return 1
+  fi
+
+  if ! git -C "$dest" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "beeshost_git_sync_repo: not a git work tree: $dest" >>"$log"
+    return 1
+  fi
+
+  git -C "$dest" remote set-url origin "https://github.com/Beeshost/${repo}.git" 2>>"$log" || true
+
+  if ! git -C "$dest" fetch origin >>"$log" 2>&1; then
+    return 1
+  fi
+
+  local head_branch cur
+  head_branch=$(git -C "$dest" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  [ -n "$head_branch" ] || head_branch=main
+
+  cur=$(git -C "$dest" branch --show-current 2>/dev/null || true)
+
+  if [ -n "$cur" ] && git -C "$dest" rev-parse -q --verify "refs/remotes/origin/$cur" >/dev/null 2>&1; then
+    if git -C "$dest" merge --ff-only "origin/$cur" >>"$log" 2>&1; then
+      return 0
+    fi
+    warn "Git: $repo — could not fast-forward; resetting clone to origin/$cur"
+    git -C "$dest" reset --hard "origin/$cur" >>"$log" 2>&1 || return 1
+    return 0
+  fi
+
+  if git -C "$dest" rev-parse -q --verify "refs/remotes/origin/$head_branch" >/dev/null 2>&1; then
+    warn "Git: $repo — checking out tracking branch origin/$head_branch"
+    git -C "$dest" checkout -B "$head_branch" "origin/$head_branch" >>"$log" 2>&1 || return 1
+    return 0
+  fi
+
+  for b in main master; do
+    if git -C "$dest" rev-parse -q --verify "refs/remotes/origin/$b" >/dev/null 2>&1; then
+      warn "Git: $repo — checking out origin/$b"
+      git -C "$dest" checkout -B "$b" "origin/$b" >>"$log" 2>&1 || return 1
+      return 0
+    fi
+  done
+
+  echo "beeshost_git_sync_repo: no matching origin branch for $repo in $dest" >>"$log"
+  return 1
+}
+
 # Clone single repo with npm install + build (all nested Node packages)
 clone_repo() {
   local repo=$1
@@ -546,8 +605,8 @@ clone_repo() {
 
   if [ -d "$dest" ]; then
     info "Pulling latest: $repo"
-    if ! ( cd "$dest" && git pull >>"$LOG_FILE" 2>&1 ); then
-      fail "Git pull failed for $repo ($dest) — see $LOG_FILE"
+    if ! run_with_retry "Git update: $repo" "$(printf 'beeshost_git_sync_repo %q %q' "$dest" "$repo")"; then
+      fail "Git update failed for $repo ($dest) — see $LOG_FILE (auth/network/dirty tree; try: cd $dest && git fetch origin && git status)"
       return 1
     fi
   else
