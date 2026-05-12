@@ -31,9 +31,18 @@ walkthrough_firebase() {
 
   if [ ! -f "/etc/beeshost/firebase-service-account.json" ]; then
     warn "Service account file not found at /etc/beeshost/firebase-service-account.json"
-    warn "Upload it now via SCP:"
-    warn "  scp firebase-service-account.json root@{server_ip}:/etc/beeshost/"
-    read -p "Press Enter when file is uploaded..."
+    info "You can paste the JSON directly into this terminal to create the file."
+    if confirm "Paste Firebase service account JSON now?" "y"; then
+      echo ""
+      info "Paste the full JSON, then press Ctrl+D on a new line to save"
+      cat > /etc/beeshost/firebase-service-account.json
+      chmod 600 /etc/beeshost/firebase-service-account.json
+      ok "Firebase service account file written"
+    else
+      warn "Upload it now via SCP:"
+      warn "  scp firebase-service-account.json root@{server_ip}:/etc/beeshost/"
+      read -p "Press Enter when file is uploaded..."
+    fi
   fi
 
   if [ -f "/etc/beeshost/firebase-service-account.json" ]; then
