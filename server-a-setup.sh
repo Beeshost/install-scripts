@@ -110,13 +110,26 @@ write_defaults /etc/beeshost/server-a.env
 section "Install PowerDNS"
 if ! step_done "powerdns"; then
   mkdir -p /opt/beeshost/dns/setup
-  
+
+  beeshost_prepare_port53_for_powerdns
   # PowerDNS repo and installation
   run_with_retry "Add PowerDNS repo" beeshost_add_powerdns_repo_auth48
   beeshost_apt_with_progress_retry "apt update (powerdns)" update
-  beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-pgsql
+  _beeshost_pdns_policy=0
+  if beeshost_dpkg_policy_no_service_start; then
+    _beeshost_pdns_policy=1
+  fi
+  if ! beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-pgsql; then
+    if [ "$_beeshost_pdns_policy" -eq 1 ]; then
+      beeshost_dpkg_policy_restore_service_start
+    fi
+    exit 1
+  fi
+  if [ "$_beeshost_pdns_policy" -eq 1 ]; then
+    beeshost_dpkg_policy_restore_service_start
+  fi
 
-  ok "PowerDNS installed"
+  ok "PowerDNS installed (run backend/dns/setup after DB + clone for gpgsql config and seed)"
   mark_step_done "powerdns"
 fi
 

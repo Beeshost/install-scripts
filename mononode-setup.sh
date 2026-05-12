@@ -245,14 +245,49 @@ if ! step_done "db-migrations"; then
   mark_step_done "db-migrations"
 fi
 
-# PowerDNS
+# PowerDNS (after repos + DB migrations: needs db-setup.sql and DATABASE_URL)
 section "Install PowerDNS"
 if ! step_done "powerdns"; then
+  beeshost_prepare_port53_for_powerdns
   run_with_retry "Add PowerDNS repo" beeshost_add_powerdns_repo_auth48
   beeshost_apt_with_progress_retry "apt update (powerdns)" update
-  beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-pgsql
+  _beeshost_pdns_policy=0
+  if beeshost_dpkg_policy_no_service_start; then
+    _beeshost_pdns_policy=1
+  fi
+  if ! beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-pgsql; then
+    if [ "$_beeshost_pdns_policy" -eq 1 ]; then
+      beeshost_dpkg_policy_restore_service_start
+    fi
+    exit 1
+  fi
+  if [ "$_beeshost_pdns_policy" -eq 1 ]; then
+    beeshost_dpkg_policy_restore_service_start
+  fi
 
-  ok "PowerDNS configured"
+  if [ ! -f /opt/beeshost/dns/setup/db-setup.sql ]; then
+    fail "Missing /opt/beeshost/dns/setup/db-setup.sql — clone the dns repo before this step"
+    exit 1
+  fi
+
+  set -a
+  # shellcheck source=/dev/null
+  source /etc/beeshost/mononode.env
+  set +a
+  if [ -z "${DATABASE_URL:-}" ] || [ -z "${PDNS_API_KEY:-}" ]; then
+    fail "mononode.env must define DATABASE_URL and PDNS_API_KEY for PowerDNS"
+    exit 1
+  fi
+
+  run_with_retry "PowerDNS PostgreSQL schema" psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /opt/beeshost/dns/setup/db-setup.sql
+
+  beeshost_pdns_gpgsql_vars_from_database_url "$DATABASE_URL"
+  beeshost_write_powerdns_gpgsql_conf
+
+  run_with_retry "Enable PowerDNS" systemctl enable pdns
+  run_with_retry "Start PowerDNS" systemctl restart pdns
+
+  ok "PowerDNS installed (gpgsql) and listening on 53; API on 127.0.0.1:8081"
   mark_step_done "powerdns"
 fi
 

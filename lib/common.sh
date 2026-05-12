@@ -243,6 +243,107 @@ EOF
   return 0
 }
 
+# Stop systemd-resolved so PowerDNS can bind UDP/TCP 53; replace stub resolv.conf when needed.
+beeshost_prepare_port53_for_powerdns() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "beeshost_prepare_port53_for_powerdns: systemctl not in PATH (chroot/container?) — ensure nothing else holds port 53 before starting pdns"
+    return 0
+  fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^systemd-resolved.service'; then
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      info "Stopping systemd-resolved so PowerDNS can use port 53"
+      systemctl stop systemd-resolved || true
+    fi
+    if systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
+      systemctl disable systemd-resolved || true
+    fi
+  fi
+  if [ -L /etc/resolv.conf ] && [ -f /run/systemd/resolve/resolv.conf ]; then
+    local target
+    target=$(readlink -f /etc/resolv.conf 2>/dev/null || true)
+    if [[ "$target" == *"/run/systemd/resolve/"* ]]; then
+      info "Replacing stub /etc/resolv.conf with upstream list from /run/systemd/resolve/resolv.conf"
+      rm -f /etc/resolv.conf
+      cp /run/systemd/resolve/resolv.conf /etc/resolv.conf
+      chmod 644 /etc/resolv.conf
+    fi
+  fi
+  return 0
+}
+
+# Parse postgresql://user:password@host:port/dbname into PDNS_DB_* (password must not contain '@').
+beeshost_pdns_gpgsql_vars_from_database_url() {
+  local raw=$1
+  raw="${raw#postgresql://}"
+  raw="${raw#postgres://}"
+  local cred hostportdb portdb
+  cred="${raw%%@*}"
+  hostportdb="${raw#*@}"
+  PDNS_DB_USER="${cred%%:*}"
+  PDNS_DB_PASSWORD="${cred#*:}"
+  PDNS_DB_HOST="${hostportdb%%:*}"
+  portdb="${hostportdb#*:}"
+  PDNS_DB_PORT="${portdb%%/*}"
+  PDNS_DB_NAME="${portdb#*/}"
+  PDNS_DB_NAME="${PDNS_DB_NAME%%\?*}"
+}
+
+# Write /etc/powerdns/pdns.conf for gpgsql + local API (expects PDNS_DB_* and PDNS_API_KEY).
+beeshost_write_powerdns_gpgsql_conf() {
+  local target=/etc/powerdns/pdns.conf
+  install -d -m 0755 /etc/powerdns
+  umask 077
+  cat >"$target" <<EOF
+launch=gpgsql
+gpgsql-host=${PDNS_DB_HOST}
+gpgsql-port=${PDNS_DB_PORT}
+gpgsql-dbname=${PDNS_DB_NAME}
+gpgsql-user=${PDNS_DB_USER}
+gpgsql-password=${PDNS_DB_PASSWORD}
+
+local-address=0.0.0.0
+local-port=53
+
+master=yes
+slave=no
+
+recursive-cache-ttl=0
+cache-ttl=20
+negquery-cache-ttl=60
+
+api=yes
+api-key=${PDNS_API_KEY}
+webserver=yes
+webserver-address=127.0.0.1
+webserver-port=8081
+webserver-allow-from=127.0.0.1
+
+disable-axfr=yes
+allow-recursion=
+EOF
+  umask 022
+  chmod 640 "$target"
+  chown root:pdns "$target" 2>/dev/null || true
+}
+
+# Skip service start/restart during dpkg (postinst) — removed immediately after apt finishes.
+beeshost_dpkg_policy_no_service_start() {
+  if [ -e /usr/sbin/policy-rc.d ]; then
+    warn "beeshost_dpkg_policy_no_service_start: /usr/sbin/policy-rc.d already exists — leaving it untouched"
+    return 1
+  fi
+  cat >/usr/sbin/policy-rc.d <<'EOF'
+#!/bin/sh
+exit 101
+EOF
+  chmod +x /usr/sbin/policy-rc.d
+  return 0
+}
+
+beeshost_dpkg_policy_restore_service_start() {
+  rm -f /usr/sbin/policy-rc.d
+}
+
 # Proxmox VE enables https://enterprise.proxmox.com/… (subscription). apt update returns 401
 # without a key and aborts the whole update. BeesHost uses no-subscription repos; disable those entries.
 beeshost_disable_proxmox_enterprise_apt_sources() {
