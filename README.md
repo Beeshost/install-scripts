@@ -1,6 +1,6 @@
 # BeesHost Setup Scripts
 
-Complete interactive bash setup scripts for Ubuntu 24.04 infrastructure deployment.
+Complete interactive bash setup scripts for Debian 12 (Bookworm) infrastructure deployment.
 
 ## Structure
 

@@ -18,7 +18,7 @@ mkdir -p /etc/beeshost
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  BeesHost — Single Node Setup"
-echo "  Ubuntu 24.04 · All-in-one"
+echo "  Debian 12 (Bookworm) · All-in-one"
 echo "  For: friends / beta / development"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

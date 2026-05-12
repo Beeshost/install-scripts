@@ -128,15 +128,18 @@ preflight_checks() {
   fi
   ok "Running as root"
 
-  # Ubuntu 24.04 check
-  if ! grep -q "Ubuntu 24.04" /etc/os-release; then
-    warn "This script is designed for Ubuntu 24.04"
-    warn "Detected: $(lsb_release -d | cut -f2)"
+  # Debian 12 (Bookworm) check
+  if ! grep -qi "debian.*12\|bookworm" /etc/os-release; then
+    warn "This script is designed for Debian 12 (Bookworm)"
+    if [ -f /etc/os-release ]; then
+      . /etc/os-release
+      warn "Detected: $PRETTY_NAME"
+    fi
     if ! confirm "Continue anyway?"; then
       exit 1
     fi
   else
-    ok "Ubuntu 24.04 detected"
+    ok "Debian 12 (Bookworm) detected"
   fi
 
   # Internet connectivity

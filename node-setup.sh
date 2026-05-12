@@ -17,7 +17,7 @@ mkdir -p /etc/beeshost
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  BeesHost — User Node Setup"
-echo "  Ubuntu 24.04 · Proxmox + Daemon"
+echo "  Debian 12 (Bookworm) · Proxmox + Daemon"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 confirm "This will configure server as a BeesHost client node. Continue?" || exit 0

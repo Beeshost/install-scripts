@@ -16,7 +16,7 @@ scripts/
 └── QUICKSTART.md              (This file) Quick reference
 ```
 
-## Deploy on Ubuntu 24.04
+## Deploy on Debian 12 (Bookworm)
 
 ### Step 1: Choose Deployment Type
 

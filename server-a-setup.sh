@@ -17,7 +17,7 @@ mkdir -p /etc/beeshost
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  BeesHost — Server A Setup"
-echo "  Ubuntu 24.04 · Central Orchestration"
+echo "  Debian 12 (Bookworm) · Central Orchestration"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 confirm "This will configure server as BeesHost Server A. Continue?" || exit 0
