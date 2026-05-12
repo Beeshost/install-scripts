@@ -195,6 +195,27 @@ run_with_retry_streaming() {
   done
 }
 
+# Proxmox VE enables https://enterprise.proxmox.com/… (subscription). apt update returns 401
+# without a key and aborts the whole update. BeesHost uses no-subscription repos; disable those entries.
+beeshost_disable_proxmox_enterprise_apt_sources() {
+  local f any=0
+  shopt -s nullglob
+  for f in /etc/apt/sources.list.d/*; do
+    [[ "$f" == *.disabled-by-beeshost ]] && continue
+    [ -f "$f" ] || continue
+    if grep -q 'enterprise\.proxmox\.com' "$f" 2>/dev/null; then
+      mv -f "$f" "${f}.disabled-by-beeshost"
+      info "Disabled subscription-only apt list: $(basename "$f") → $(basename "${f}.disabled-by-beeshost")"
+      any=1
+    fi
+  done
+  shopt -u nullglob
+  if [ "$any" -eq 1 ]; then
+    ok "Proxmox enterprise apt source(s) disabled — apt update can proceed without a subscription"
+  fi
+  return 0
+}
+
 # Rough apt progress: estimate total archive lines from a simulate --print-uris pass, then
 # show ~% from live "Get:" lines (install/upgrade). For "update", streams output only (no %).
 beeshost_apt_with_progress() {
@@ -206,6 +227,7 @@ beeshost_apt_with_progress() {
 
   case "$mode" in
     update)
+      beeshost_disable_proxmox_enterprise_apt_sources || true
       info "$desc — running (apt update has no reliable total; watch lines below)"
       (
         set -o pipefail
