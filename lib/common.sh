@@ -90,6 +90,14 @@ beeshost_retry_prompt_ok() {
   [ -t 0 ] && [ "${BEESHOST_NONINTERACTIVE:-}" != "1" ]
 }
 
+# GitHub repo slug under github.com/Beeshost/ (may differ from /opt/beeshost directory name).
+beeshost_github_repo_slug() {
+  case "${1:-}" in
+    backup) printf '%s' 'bakup' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # Run command with retry
 # Usage: run_with_retry "description" command [args...]
 run_with_retry() {
@@ -537,8 +545,9 @@ setup_git() {
   fi
 
   for check_repo in backup orchestrator; do
-    if ! git ls-remote "https://github.com/Beeshost/${check_repo}.git" > /dev/null 2>&1; then
-      warn "Cannot reach github.com/Beeshost/${check_repo}.git with this token — clone of '${check_repo}' will fail later (create the repo or fix token / org SSO)."
+    slug=$(beeshost_github_repo_slug "$check_repo")
+    if ! git ls-remote "https://github.com/Beeshost/${slug}.git" > /dev/null 2>&1; then
+      warn "Cannot reach github.com/Beeshost/${slug}.git (${check_repo}) with this token — clone of '${check_repo}' will fail later (create the repo or fix token / org SSO)."
     fi
   done
 
@@ -679,16 +688,18 @@ beeshost_git_sync_repo() {
 clone_repo() {
   local repo=$1
   local dest=${2:-/opt/beeshost/$repo}
+  local github_slug
+  github_slug=$(beeshost_github_repo_slug "$repo")
 
   if [ -d "$dest" ]; then
     info "Pulling latest: $repo"
-    if ! run_with_retry "Git update: $repo" "$(printf 'beeshost_git_sync_repo %q %q' "$dest" "$repo")"; then
+    if ! run_with_retry "Git update: $repo" "$(printf 'beeshost_git_sync_repo %q %q' "$dest" "$github_slug")"; then
       fail "Git update failed for $repo ($dest) — see $LOG_FILE (auth/network/dirty tree; try: cd $dest && git fetch origin && git status)"
       return 1
     fi
   else
-    run_with_retry "Git clone: $repo (github.com/Beeshost/${repo}.git)" \
-      "git clone https://github.com/Beeshost/${repo}.git $dest" || return 1
+    run_with_retry "Git clone: $repo (github.com/Beeshost/${github_slug}.git)" \
+      "git clone https://github.com/Beeshost/${github_slug}.git $dest" || return 1
   fi
 
   # Orchestrator imports expect ../Postgres while the repo is cloned as "postgres" (case).
