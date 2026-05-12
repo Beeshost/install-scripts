@@ -513,53 +513,60 @@ beeshost_npm_install_build_tree() {
     return 1
   fi
 
-  local pkg rel_dir dir
-  while IFS= read -r -d '' pkg; do
-    dir=$(dirname "$pkg")
-    if [ "$dir" = "$root_dir" ]; then
-      rel_dir="$repo_label"
-    else
-      rel_dir="$repo_label/${dir#$root_dir/}"
-    fi
+  # mononode/node scripts often source *.env with NODE_ENV=production. Some npm versions still
+  # omit devDependencies in edge cases; builds need tsc/prisma/vitest from devDependencies.
+  (
+    export NODE_ENV=development
+    unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
 
-    cd "$dir" || return 1
-    run_with_retry "npm install --include=dev ($rel_dir)" npm install --include=dev || return 1
+    local pkg rel_dir dir
+    while IFS= read -r -d '' pkg; do
+      dir=$(dirname "$pkg")
+      if [ "$dir" = "$root_dir" ]; then
+        rel_dir="$repo_label"
+      else
+        rel_dir="$repo_label/${dir#$root_dir/}"
+      fi
 
-    if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ]; then
-      local schema_path prisma_bin pg_home
-      for schema_path in "../Postgres/prisma/schema.prisma" "../postgres/prisma/schema.prisma"; do
-        if [ -f "$schema_path" ]; then
-          prisma_bin="./node_modules/.bin/prisma"
-          if [ ! -x "$prisma_bin" ]; then
-            pg_home=$(cd "$dir" && cd "$(dirname "$(dirname "$schema_path")")" && pwd)
-            if [ -x "$pg_home/node_modules/.bin/prisma" ]; then
-              prisma_bin="$pg_home/node_modules/.bin/prisma"
+      cd "$dir" || exit 1
+      run_with_retry "npm install --include=dev ($rel_dir)" npm install --include=dev || exit 1
+
+      if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ]; then
+        local schema_path prisma_bin pg_home
+        for schema_path in "../Postgres/prisma/schema.prisma" "../postgres/prisma/schema.prisma"; do
+          if [ -f "$schema_path" ]; then
+            prisma_bin="./node_modules/.bin/prisma"
+            if [ ! -x "$prisma_bin" ]; then
+              pg_home=$(cd "$dir" && cd "$(dirname "$(dirname "$schema_path")")" && pwd)
+              if [ -x "$pg_home/node_modules/.bin/prisma" ]; then
+                prisma_bin="$pg_home/node_modules/.bin/prisma"
+              fi
             fi
+            if [ -x "$prisma_bin" ]; then
+              run_with_retry "prisma generate ($rel_dir)" "$prisma_bin" generate --schema="$schema_path" || exit 1
+            elif command -v npx >/dev/null 2>&1; then
+              # Bare "npx prisma" pulls latest CLI (v7+) and breaks v5 schemas; pin major 5.
+              run_with_retry "npx prisma generate ($rel_dir)" npx --yes --package=prisma@5.22.0 prisma generate --schema="$schema_path" || exit 1
+            else
+              warn "prisma generate ($rel_dir): no local prisma CLI and npx missing"
+              exit 1
+            fi
+            break
           fi
-          if [ -x "$prisma_bin" ]; then
-            run_with_retry "prisma generate ($rel_dir)" "$prisma_bin" generate --schema="$schema_path" || return 1
-          elif command -v npx >/dev/null 2>&1; then
-            # Bare "npx prisma" pulls latest CLI (v7+) and breaks v5 schemas; pin major 5.
-            run_with_retry "npx prisma generate ($rel_dir)" npx --yes --package=prisma@5.22.0 prisma generate --schema="$schema_path" || return 1
-          else
-            warn "prisma generate ($rel_dir): no local prisma CLI and npx missing"
-            return 1
-          fi
-          break
-        fi
-      done
-    fi
+        done
+      fi
 
-    if [ -f prisma/schema.prisma ] && grep -q '"generate"' package.json; then
-      run_with_retry "npm run generate ($rel_dir)" npm run generate || return 1
-    fi
+      if [ -f prisma/schema.prisma ] && grep -q '"generate"' package.json; then
+        run_with_retry "npm run generate ($rel_dir)" npm run generate || exit 1
+      fi
 
-    if grep -q '"build"' package.json; then
-      run_with_retry "npm run build ($rel_dir)" npm run build || return 1
-    fi
-  done < <(find "$root_dir" \
-    \( -path "*/node_modules/*" -o -path "*/.git/*" -o -path "*/tmp/*" -o -path "*/.continue/*" \) -prune -o \
-    -name package.json -print0)
+      if grep -q '"build"' package.json; then
+        run_with_retry "npm run build ($rel_dir)" npm run build || exit 1
+      fi
+    done < <(find "$root_dir" \
+      \( -path "*/node_modules/*" -o -path "*/.git/*" -o -path "*/tmp/*" -o -path "*/.continue/*" \) -prune -o \
+      -name package.json -print0)
+  ) || return 1
 
   return 0
 }
