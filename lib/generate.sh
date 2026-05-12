@@ -4,6 +4,17 @@
 
 # Generate all secrets that don't need external services
 generate_secrets() {
+  local secrets_file=/etc/beeshost/generated-secrets.env
+  mkdir -p /etc/beeshost
+
+  if [ -f "$secrets_file" ]; then
+    section "Generating secrets"
+    # shellcheck source=/dev/null
+    source "$secrets_file"
+    ok "Loaded saved secrets from $secrets_file (delete this file only if you intentionally want new random secrets)"
+    return 0
+  fi
+
   section "Generating secrets"
 
   ENCRYPTION_KEY=$(openssl rand -hex 32)
@@ -24,9 +35,20 @@ generate_secrets() {
   ADMIN_TOKEN=$(openssl rand -hex 32)
   ok "Generated ADMIN_TOKEN"
 
+  {
+    printf '%s=%q\n' ENCRYPTION_KEY "$ENCRYPTION_KEY"
+    printf '%s=%q\n' DAEMON_API_KEY "$DAEMON_API_KEY"
+    printf '%s=%q\n' DAEMON_HMAC_SECRET "$DAEMON_HMAC_SECRET"
+    printf '%s=%q\n' PDNS_API_KEY "$PDNS_API_KEY"
+    printf '%s=%q\n' DB_PASSWORD "$DB_PASSWORD"
+    printf '%s=%q\n' ADMIN_TOKEN "$ADMIN_TOKEN"
+  } > "$secrets_file"
+  chmod 600 "$secrets_file"
+  ok "Secrets written to $secrets_file (safe to disconnect; re-runs load this file)"
+
   # Print generated values for user to save
   echo ""
-  warn "SAVE THESE VALUES — shown once only:"
+  warn "SAVE THESE VALUES — also stored on disk at $secrets_file"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "ENCRYPTION_KEY=$ENCRYPTION_KEY"
   echo "DAEMON_API_KEY=$DAEMON_API_KEY"
@@ -37,7 +59,7 @@ generate_secrets() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
 
-  confirm "Have you saved these values?" || {
+  confirm "Have you saved a copy of these values (optional; disk backup exists)?" || {
     warn "Please save them now before continuing"
     confirm "Ready to continue?" || exit 1
   }

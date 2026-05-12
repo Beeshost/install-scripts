@@ -9,6 +9,11 @@ AMBER='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Unattended apt/debconf (postfix, grub, etc.); inherited by all scripts sourcing this file
+export DEBIAN_FRONTEND=noninteractive
+# Avoid needrestart interrupting apt upgrade/install on Debian/Ubuntu
+export NEEDRESTART_MODE=a
+
 # Status printing
 ok() {
   echo -e "[${GREEN}  OK  ${NC}] $1" | tee -a "$LOG_FILE"
@@ -38,12 +43,19 @@ section() {
   echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" | tee -a "$LOG_FILE"
 }
 
-# Prompt with default value
+# Prompt with default value (reuses /etc/beeshost/wizard-state.env after disconnect)
 prompt() {
   local var_name=$1
   local prompt_text=$2
   local default=$3
   local secret=$4   # if "secret" → hide input
+
+  beeshost_load_wizard_state_once
+  local saved_val="${!var_name}"
+  if [ -n "$saved_val" ]; then
+    info "Using saved ${var_name} from ${WIZARD_STATE_FILE} — to re-enter: delete that line or run --undo-step on the relevant installer step"
+    return 0
+  fi
 
   if [ -n "$default" ]; then
     prompt_text="$prompt_text (default: $default)"
@@ -61,6 +73,7 @@ prompt() {
   fi
 
   eval "$var_name='$value'"
+  persist_wizard_kv "$var_name" "$value"
 }
 
 # Confirm prompt
@@ -111,11 +124,147 @@ step_done() {
   [ -f "/etc/beeshost/.step-${step}-complete" ]
 }
 
-# Mark step complete
+# Mark step complete (idempotent; records order for --undo-last)
 mark_step_done() {
   local step=$1
   mkdir -p /etc/beeshost
-  touch "/etc/beeshost/.step-${step}-complete"
+  local marker="/etc/beeshost/.step-${step}-complete"
+  if [ ! -f "$marker" ]; then
+    touch "$marker"
+    echo "$step" >> /etc/beeshost/step-completed-order.log
+  fi
+}
+
+# Remove a single step marker (does not uninstall packages)
+unmark_step() {
+  local step=$1
+  rm -f "/etc/beeshost/.step-${step}-complete"
+  if [ -f /etc/beeshost/step-completed-order.log ]; then
+    grep -vFx "$step" /etc/beeshost/step-completed-order.log > /etc/beeshost/step-completed-order.log.tmp 2>/dev/null \
+      && mv /etc/beeshost/step-completed-order.log.tmp /etc/beeshost/step-completed-order.log
+  fi
+  ok "Removed step marker: $step (re-run setup to repeat; apt packages stay installed)"
+}
+
+# Pop last completed step from the order log and remove its marker
+undo_last_marked_step() {
+  local log=/etc/beeshost/step-completed-order.log
+  if [ ! -s "$log" ]; then
+    warn "No completed steps recorded in $log (markers may still exist from older runs)"
+    return 1
+  fi
+  local last
+  last=$(tail -n 1 "$log")
+  head -n -1 "$log" > "${log}.tmp" && mv "${log}.tmp" "$log"
+  rm -f "/etc/beeshost/.step-${last}-complete"
+  ok "Undid last recorded step: $last — re-run the installer to repeat it"
+  warn "Packages are not removed; only the resume marker was cleared."
+}
+
+list_setup_status() {
+  section "BeesHost setup — progress"
+  if [ -s /etc/beeshost/step-completed-order.log ]; then
+    info "Steps completed (oldest → newest):"
+    nl -ba /etc/beeshost/step-completed-order.log
+  else
+    info "No step history file yet (or empty). Markers only:"
+  fi
+  echo ""
+  info "Active step markers:"
+  if compgen -G "/etc/beeshost/.step-*-complete" > /dev/null; then
+    for m in /etc/beeshost/.step-*-complete; do
+      echo "  ${m#/etc/beeshost/.step-}" | sed 's/-complete$//'
+    done
+  else
+    info "No .step-*-complete markers under /etc/beeshost"
+  fi
+  echo ""
+  info "State files:"
+  for f in /etc/beeshost/wizard-state.env /etc/beeshost/generated-secrets.env \
+           /etc/beeshost/node.env \
+           /etc/beeshost/node-daemon-inputs.env /etc/beeshost/server-a.env \
+           /etc/beeshost/mononode.env /etc/beeshost/proxmox-api-token.env; do
+    [ -f "$f" ] && echo "  $f"
+  done
+}
+
+beeshost_setup_help() {
+  cat << 'EOF'
+BeesHost setup — optional arguments
+  --status              Show completed steps and saved state files
+  --undo-last           Remove the most recently recorded step marker (safe: no apt remove)
+  --undo-step=NAME      Remove marker for one step (e.g. proxmox-token-verified)
+  --help                This help
+
+Typo in a prompt? Use --undo-last or --undo-step, then re-run the installer.
+Wizard answers are stored in /etc/beeshost/wizard-state.env (chmod 600).
+To change one answer: delete its line from wizard-state.env, then re-run.
+Generated secrets load from /etc/beeshost/generated-secrets.env if present.
+After --undo-step=proxmox-token-verified, delete /etc/beeshost/proxmox-api-token.env if you need to paste a new token.
+EOF
+}
+
+# Set by beeshost_parse_setup_cli_args; main scripts call beeshost_handle_setup_action early
+BEESHOST_SETUP_ACTION=run
+BEESHOST_UNDO_STEP=""
+
+beeshost_parse_setup_cli_args() {
+  BEESHOST_SETUP_ACTION=run
+  BEESHOST_UNDO_STEP=""
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --status) BEESHOST_SETUP_ACTION=status ;;
+      --undo-last) BEESHOST_SETUP_ACTION=undo-last ;;
+      --undo-step=*) BEESHOST_SETUP_ACTION=undo-step; BEESHOST_UNDO_STEP="${a#*=}" ;;
+      --help|-h) BEESHOST_SETUP_ACTION=help ;;
+    esac
+  done
+}
+
+beeshost_handle_setup_action() {
+  case "${BEESHOST_SETUP_ACTION:-run}" in
+    status) list_setup_status; exit 0 ;;
+    undo-last) undo_last_marked_step; exit 0 ;;
+    undo-step)
+      if [ -z "$BEESHOST_UNDO_STEP" ]; then
+        fail "Usage: $0 --undo-step=STEP_NAME"
+        exit 1
+      fi
+      unmark_step "$BEESHOST_UNDO_STEP"
+      exit 0
+      ;;
+    help) beeshost_setup_help; exit 0 ;;
+  esac
+}
+
+# Persisted wizard / prompt answers (single-line values; printf %q for safe sourcing)
+WIZARD_STATE_FILE="/etc/beeshost/wizard-state.env"
+BEESHOST_WIZARD_LOADED=""
+
+beeshost_load_wizard_state_once() {
+  [ -n "${BEESHOST_WIZARD_LOADED:-}" ] && return 0
+  BEESHOST_WIZARD_LOADED=1
+  if [ -f "$WIZARD_STATE_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$WIZARD_STATE_FILE"
+  fi
+}
+
+persist_wizard_kv() {
+  local key=$1
+  local val=$2
+  [ -z "$key" ] && return 1
+  mkdir -p /etc/beeshost
+  if [ -f "$WIZARD_STATE_FILE" ]; then
+    grep -v "^${key}=" "$WIZARD_STATE_FILE" > "${WIZARD_STATE_FILE}.new" 2>/dev/null || : > "${WIZARD_STATE_FILE}.new"
+  else
+    : > "${WIZARD_STATE_FILE}.new"
+  fi
+  { cat "${WIZARD_STATE_FILE}.new"; printf '%s=%q\n' "$key" "$val"; } > "${WIZARD_STATE_FILE}.tmp"
+  mv "${WIZARD_STATE_FILE}.tmp" "$WIZARD_STATE_FILE"
+  rm -f "${WIZARD_STATE_FILE}.new"
+  chmod 600 "$WIZARD_STATE_FILE"
 }
 
 # Pre-flight checks (shared)

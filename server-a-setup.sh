@@ -14,6 +14,9 @@ STEPS_SKIPPED=()
 
 mkdir -p /etc/beeshost
 
+beeshost_parse_setup_cli_args "$@"
+beeshost_handle_setup_action
+
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  BeesHost — Server A Setup"
@@ -21,6 +24,8 @@ echo "  Debian 12 (Bookworm) · Central Orchestration"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 confirm "This will configure server as BeesHost Server A. Continue?" || exit 0
+
+info "Progress is stored under /etc/beeshost — sudo bash $0 --status | --undo-last | --undo-step=NAME"
 
 preflight_checks
 system_update
@@ -33,6 +38,15 @@ walkthrough_stripe
 walkthrough_email
 walkthrough_firebase_web
 walkthrough_email_api
+
+if [ -f /etc/beeshost/server-a.env ]; then
+  section "Resume: loading /etc/beeshost/server-a.env"
+  set -a
+  # shellcheck source=/dev/null
+  source /etc/beeshost/server-a.env
+  set +a
+  ok "Loaded saved server configuration (edit that file or clear wizard-state to change values)"
+fi
 
 # Collect Server A config
 section "Server A configuration"

@@ -15,6 +15,9 @@ STEPS_SKIPPED=()
 
 mkdir -p /etc/beeshost
 
+beeshost_parse_setup_cli_args "$@"
+beeshost_handle_setup_action
+
 clear
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  BeesHost — Single Node Setup"
@@ -27,6 +30,8 @@ warn "For production, use separate server-a-setup.sh + node-setup.sh"
 echo ""
 confirm "Continue with single-node setup?" || exit 0
 
+info "Progress is stored under /etc/beeshost — sudo bash $0 --status | --undo-last | --undo-step=NAME"
+
 preflight_checks
 system_update
 install_nodejs
@@ -38,6 +43,15 @@ walkthrough_stripe
 walkthrough_email
 walkthrough_firebase_web
 walkthrough_email_api
+
+if [ -f /etc/beeshost/mononode.env ]; then
+  section "Resume: loading /etc/beeshost/mononode.env"
+  set -a
+  # shellcheck source=/dev/null
+  source /etc/beeshost/mononode.env
+  set +a
+  ok "Loaded saved mononode configuration"
+fi
 
 # Config
 section "Server configuration"
@@ -111,7 +125,8 @@ if ! step_done "proxmox-installed"; then
   fi
 
   run_with_retry "apt update (proxmox)" apt update
-  run_with_retry "Install Proxmox" apt install -y proxmox-ve postfix open-iscsi
+  run_with_retry "Install Proxmox" \
+    DEBIAN_FRONTEND=noninteractive apt install -y proxmox-ve postfix open-iscsi
 
   mark_step_done "proxmox-installed"
   STEPS_OK+=("Proxmox VE installed")
@@ -129,26 +144,49 @@ if ! step_done "proxmox-installed"; then
   exit 0
 fi
 
+set -a
+if [ -f /etc/beeshost/mononode.env ]; then
+  # shellcheck source=/dev/null
+  source /etc/beeshost/mononode.env
+fi
+if [ -f /etc/beeshost/proxmox-api-token.env ]; then
+  # shellcheck source=/dev/null
+  source /etc/beeshost/proxmox-api-token.env
+fi
+set +a
+THIS_IP=$(curl -s https://api.ipify.org)
+
 # Proxmox API token
 section "Configure Proxmox API token"
-echo ""
-echo "  1. Open https://${THIS_IP}:8006 in your browser"
-echo "  2. Log in as root"
-echo "  3. Datacenter → Permissions → API Tokens → Add"
-echo "  4. User: root@pam, Token ID: beeshost"
-echo "  5. Uncheck Privilege Separation → Add"
-echo "  6. Copy the token secret"
-echo ""
-read -p "Press Enter when ready..."
-prompt PROXMOX_TOKEN "Paste Proxmox API token (root@pam!beeshost=...)" "" secret
 
-if curl -s -k -H "Authorization: PVEAPIToken=root@pam!beeshost=${PROXMOX_TOKEN}" \
+if step_done "proxmox-token-verified"; then
+  info "Proxmox API token already verified — continuing"
+elif [ -n "${PROXMOX_TOKEN:-}" ] && curl -s -k -H "Authorization: PVEAPIToken=root@pam!beeshost=${PROXMOX_TOKEN}" \
   https://localhost:8006/api2/json/version 2>/dev/null | grep -q "version"; then
-  ok "Proxmox API token verified"
+  ok "Proxmox API token from saved file is valid"
   mark_step_done "proxmox-token-verified"
 else
-  fail "Proxmox API token invalid"
-  STEPS_FAILED+=("Proxmox API token")
+  echo ""
+  echo "  1. Open https://${THIS_IP}:8006 in your browser"
+  echo "  2. Log in as root"
+  echo "  3. Datacenter → Permissions → API Tokens → Add"
+  echo "  4. User: root@pam, Token ID: beeshost"
+  echo "  5. Uncheck Privilege Separation → Add"
+  echo "  6. Copy the token secret"
+  echo ""
+  read -p "Press Enter when ready..."
+  prompt PROXMOX_TOKEN "Paste Proxmox API token (root@pam!beeshost=...)" "" secret
+
+  if curl -s -k -H "Authorization: PVEAPIToken=root@pam!beeshost=${PROXMOX_TOKEN}" \
+    https://localhost:8006/api2/json/version 2>/dev/null | grep -q "version"; then
+    ok "Proxmox API token verified"
+    mark_step_done "proxmox-token-verified"
+    printf '%s=%q\n' PROXMOX_TOKEN "$PROXMOX_TOKEN" > /etc/beeshost/proxmox-api-token.env
+    chmod 600 /etc/beeshost/proxmox-api-token.env
+  else
+    fail "Proxmox API token invalid"
+    STEPS_FAILED+=("Proxmox API token")
+  fi
 fi
 
 # Clone all repos
@@ -258,13 +296,17 @@ EOF
 chmod 600 /opt/beeshost/webmail/.env
 ok "Configured webmail"
 
-# Daemon-specific additions
-cat >> /opt/beeshost/proxmox-daemon/.env << EOF
+# Daemon-specific additions (idempotent on re-runs)
+if [ -f /opt/beeshost/proxmox-daemon/.env ] && grep -q '^PROXMOX_HOST=' /opt/beeshost/proxmox-daemon/.env 2>/dev/null; then
+  info "proxmox-daemon .env already has Proxmox connection block — skipping append"
+else
+  cat >> /opt/beeshost/proxmox-daemon/.env << EOF
 PROXMOX_HOST=https://localhost:8006
 PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN}
 PROXMOX_VERIFY_SSL=false
 ALLOWED_IP=127.0.0.1
 EOF
+fi
 
 # Install all services
 section "Install systemd services"
