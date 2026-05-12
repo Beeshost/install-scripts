@@ -198,8 +198,9 @@ fi
 section "Clone all repositories"
 mkdir -p /opt/beeshost
 
-# Order matters: Orchestrator tsc follows ../../Postgres, ../../tickets, etc. — those repos
-# must exist before orchestrator. Symlink Postgres→postgres is created in clone_repo.
+# Order matters: Orchestrator tsc follows ../../Postgres, ../../tickets, ../../deployment-health,
+# ../../proxmox-wrapper, etc. — those repos must exist before orchestrator. Symlink Postgres→postgres
+# is created in clone_repo.
 ALL_REPOS=(
   "postgres"
   "proxmox-wrapper"
@@ -210,10 +211,10 @@ ALL_REPOS=(
   "env-manager"
   "log-viewer"
   "dns"
+  "deployment-health"
   "orchestrator"
   "abusemonitor"
   "backup"
-  "deployment-health"
   "mailproxy"
   "mailserver"
   "nodejs-version-alerts"

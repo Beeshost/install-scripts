@@ -140,16 +140,17 @@ mkdir -p /opt/beeshost
 # Orchestrator must be cloned after sibling packages it type-checks against (see clone_repo).
 REPOS=(
   "postgres"
+  "proxmox-wrapper"
   "crash-handler"
   "tickets"
   "vuln-scanner"
   "env-manager"
   "log-viewer"
   "dns"
+  "deployment-health"
   "orchestrator"
   "abusemonitor"
   "backup"
-  "deployment-health"
   "mailproxy"
   "nodejs-version-alerts"
   "upgrade-suggestions"
