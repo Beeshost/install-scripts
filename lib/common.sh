@@ -525,6 +525,16 @@ beeshost_npm_install_build_tree() {
     cd "$dir" || return 1
     run_with_retry "npm install --include=dev ($rel_dir)" npm install --include=dev || return 1
 
+    if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ] && command -v npx >/dev/null 2>&1; then
+      local schema_path
+      for schema_path in "../Postgres/prisma/schema.prisma" "../postgres/prisma/schema.prisma"; do
+        if [ -f "$schema_path" ]; then
+          run_with_retry "npx prisma generate ($rel_dir)" npx prisma generate --schema="$schema_path" || return 1
+          break
+        fi
+      done
+    fi
+
     if [ -f prisma/schema.prisma ] && grep -q '"generate"' package.json; then
       run_with_retry "npm run generate ($rel_dir)" npm run generate || return 1
     fi
