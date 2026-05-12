@@ -102,8 +102,8 @@ run_with_retry() {
 
   while [ $attempt -le $max_attempts ]; do
     rc=0
-    # Builds/prisma were only visible in $LOG_FILE; mirror them to the console too.
-    if [[ "$description" == *"npm run build"* ]] || [[ "$description" == *"prisma generate"* ]] || [[ "$description" == *"npm run generate"* ]]; then
+    # Builds/prisma/git were only visible in $LOG_FILE; mirror them to the console too.
+    if [[ "$description" == *"npm run build"* ]] || [[ "$description" == *"prisma generate"* ]] || [[ "$description" == *"npm run generate"* ]] || [[ "$description" == *"Git clone"* ]] || [[ "$description" == *"Git update"* ]]; then
       set -o pipefail
       eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
       rc=${PIPESTATUS[0]}
@@ -124,6 +124,9 @@ run_with_retry() {
 
     if [ $attempt -lt $max_attempts ]; then
       warn "$description failed (attempt $attempt/$max_attempts, exit $rc)"
+      if [[ "$description" == *"Git clone"* ]] || [[ "$description" == *"Git update"* ]]; then
+        warn "Git exit $rc is often: missing repo github.com/Beeshost/…, private repo without token 'repo' scope, or GitHub org SSO — re-authorize the PAT for the org."
+      fi
       if beeshost_retry_prompt_ok && confirm "Retry?"; then
         attempt=$((attempt + 1))
       elif beeshost_retry_prompt_ok; then
@@ -135,6 +138,9 @@ run_with_retry() {
         sleep "${BEESHOST_RETRY_SLEEP_SECONDS:-2}"
       fi
     else
+      if [[ "$description" == *"Git clone"* ]] || [[ "$description" == *"Git update"* ]]; then
+        warn "Git exit $rc is often: missing repo github.com/Beeshost/…, private repo without token 'repo' scope, or GitHub org SSO — re-authorize the PAT for the org."
+      fi
       fail "$description — failed after $max_attempts attempts"
       STEPS_FAILED+=("$description")
       return 1
@@ -521,15 +527,22 @@ setup_git() {
   echo "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
   chmod 600 ~/.git-credentials
 
-  # Verify access
+  # Verify access (required repo + common monorepo clones)
   if git ls-remote https://github.com/Beeshost/proxmox-daemon.git > /dev/null 2>&1; then
-    ok "GitHub access verified"
-    mark_step_done "git-auth"
+    ok "GitHub access verified (proxmox-daemon)"
   else
     fail "Cannot access Beeshost GitHub repos"
     warn "Make sure your token has 'repo' scope and access to Beeshost org"
     exit 1
   fi
+
+  for check_repo in backup orchestrator; do
+    if ! git ls-remote "https://github.com/Beeshost/${check_repo}.git" > /dev/null 2>&1; then
+      warn "Cannot reach github.com/Beeshost/${check_repo}.git with this token — clone of '${check_repo}' will fail later (create the repo or fix token / org SSO)."
+    fi
+  done
+
+  mark_step_done "git-auth"
 }
 
 # Every directory under root_dir that contains package.json (excluding dependency
