@@ -525,11 +525,26 @@ beeshost_npm_install_build_tree() {
     cd "$dir" || return 1
     run_with_retry "npm install --include=dev ($rel_dir)" npm install --include=dev || return 1
 
-    if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ] && command -v npx >/dev/null 2>&1; then
-      local schema_path
+    if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ]; then
+      local schema_path prisma_bin pg_home
       for schema_path in "../Postgres/prisma/schema.prisma" "../postgres/prisma/schema.prisma"; do
         if [ -f "$schema_path" ]; then
-          run_with_retry "npx prisma generate ($rel_dir)" npx prisma generate --schema="$schema_path" || return 1
+          prisma_bin="./node_modules/.bin/prisma"
+          if [ ! -x "$prisma_bin" ]; then
+            pg_home=$(cd "$dir" && cd "$(dirname "$(dirname "$schema_path")")" && pwd)
+            if [ -x "$pg_home/node_modules/.bin/prisma" ]; then
+              prisma_bin="$pg_home/node_modules/.bin/prisma"
+            fi
+          fi
+          if [ -x "$prisma_bin" ]; then
+            run_with_retry "prisma generate ($rel_dir)" "$prisma_bin" generate --schema="$schema_path" || return 1
+          elif command -v npx >/dev/null 2>&1; then
+            # Bare "npx prisma" pulls latest CLI (v7+) and breaks v5 schemas; pin major 5.
+            run_with_retry "npx prisma generate ($rel_dir)" npx --yes --package=prisma@5.22.0 prisma generate --schema="$schema_path" || return 1
+          else
+            warn "prisma generate ($rel_dir): no local prisma CLI and npx missing"
+            return 1
+          fi
           break
         fi
       done
