@@ -58,7 +58,7 @@ section "Server configuration"
 THIS_IP=$(curl -s https://api.ipify.org)
 info "Detected public IP: ${THIS_IP}"
 SERVER_A_IP=${THIS_IP}
-prompt DOMAIN "Your domain (e.g. beeshost.eu)"
+prompt DOMAIN "Apex domain only — no https:// and no panel. prefix (e.g. beeshost.eu)"
 prompt ADMIN_EMAIL "Admin email address"
 DAEMON_PORT="3001"
 
@@ -248,13 +248,9 @@ fi
 # PowerDNS
 section "Install PowerDNS"
 if ! step_done "powerdns"; then
-  run_with_retry "Add PowerDNS repo" \
-    "echo 'deb [signed-by=/usr/share/keyrings/powerdns-repo.gpg.key] http://repo.powerdns.com/ubuntu focal-auth-48 main' > /etc/apt/sources.list.d/powerdns.list"
-
-  if curl -s https://repo.powerdns.com/FD380FBB-pub.asc | gpg --dearmor > /usr/share/keyrings/powerdns-repo.gpg.key; then
-    beeshost_apt_with_progress_retry "apt update (powerdns)" update
-    beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-postgresql
-  fi
+  run_with_retry "Add PowerDNS repo" beeshost_add_powerdns_repo_auth48
+  beeshost_apt_with_progress_retry "apt update (powerdns)" update
+  beeshost_apt_with_progress_retry "Install PowerDNS" install pdns-server pdns-backend-pgsql
 
   ok "PowerDNS configured"
   mark_step_done "powerdns"
@@ -365,30 +361,7 @@ fi
 # Nginx
 section "Configure nginx"
 if ! step_done "nginx-configured"; then
-  cat > /etc/nginx/sites-available/beeshost << EOF
-server {
-    listen 80;
-    server_name panel.${DOMAIN};
-    root /var/www/panel;
-    index index.html;
-    location / { try_files \$uri \$uri/ /index.html; }
-    location /api { proxy_pass http://localhost:3000; }
-}
-
-server {
-    listen 80;
-    server_name webmail.${DOMAIN};
-    root /var/www/webmail;
-    index index.html;
-    location / { try_files \$uri \$uri/ /index.html; }
-}
-
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    return 301 https://\$host\$request_uri;
-}
-EOF
+  beeshost_write_nginx_beeshost_http_site
 
   ln -sf /etc/nginx/sites-available/beeshost /etc/nginx/sites-enabled/
   run_with_retry "Test nginx" nginx -t
@@ -400,8 +373,9 @@ fi
 # SSL
 section "Issue SSL certificates"
 if ! step_done "ssl-issued"; then
+  beeshost_ufw_allow_acme_if_active
   run_with_retry "Issue SSL via certbot" \
-    "certbot --nginx -d ${DOMAIN} -d panel.${DOMAIN} -d webmail.${DOMAIN} -d mail.${DOMAIN} \
+    "certbot --nginx -d ${DOMAIN} -d panel.${DOMAIN} -d api.${DOMAIN} -d webmail.${DOMAIN} -d mail.${DOMAIN} \
      --non-interactive --agree-tos -m ${ADMIN_EMAIL} --redirect"
 
   mark_step_done "ssl-issued"

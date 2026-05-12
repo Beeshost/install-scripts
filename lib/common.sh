@@ -195,6 +195,54 @@ run_with_retry_streaming() {
   done
 }
 
+# Official PowerDNS authoritative 4.8.x apt repo. Must match the host OS (Debian vs Ubuntu + codename);
+# mixing e.g. Ubuntu focal on Debian bookworm yields missing or wrong packages.
+# PostgreSQL backend package is always pdns-backend-pgsql (gpgsql in pdns.conf), not …-postgresql.
+beeshost_add_powerdns_repo_auth48() {
+  local keyring=/usr/share/keyrings/powerdns-repo.gpg.key
+  local id codename repo_root suite auth_series=48
+
+  if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+  fi
+  id="${ID:-debian}"
+  codename="${VERSION_CODENAME:-bookworm}"
+  if [ -z "$codename" ]; then
+    codename=bookworm
+  fi
+
+  # repo.powerdns.com lists noble-auth-49+ for Ubuntu 24.04, not noble-auth-48.
+  if [ "$id" = "ubuntu" ] && [ "$codename" = "noble" ]; then
+    auth_series=49
+  fi
+
+  case "$id" in
+    ubuntu) repo_root="http://repo.powerdns.com/ubuntu" ;;
+    *) repo_root="http://repo.powerdns.com/debian" ;;
+  esac
+
+  suite="${codename}-auth-${auth_series}"
+
+  install -d "$(dirname "$keyring")"
+  if ! curl -fsSL https://repo.powerdns.com/FD380FBB-pub.asc | gpg --dearmor -o "$keyring" 2>/dev/null; then
+    warn "beeshost_add_powerdns_repo_auth48: failed to download/dearmor PowerDNS signing key"
+    return 1
+  fi
+
+  echo "deb [signed-by=${keyring}] ${repo_root} ${suite} main" >/etc/apt/sources.list.d/powerdns.list
+
+  install -d /etc/apt/preferences.d
+  cat >/etc/apt/preferences.d/beeshost-powerdns <<'EOF'
+Package: pdns-*
+Pin: origin repo.powerdns.com
+Pin-Priority: 600
+EOF
+
+  info "PowerDNS apt: ${repo_root} ${suite} (${id}/${codename})"
+  return 0
+}
+
 # Proxmox VE enables https://enterprise.proxmox.com/… (subscription). apt update returns 401
 # without a key and aborts the whole update. BeesHost uses no-subscription repos; disable those entries.
 beeshost_disable_proxmox_enterprise_apt_sources() {
@@ -883,6 +931,96 @@ setup_ufw_base() {
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow 22/tcp comment "SSH"
+}
+
+# If UFW was enabled before the main "Configure firewall" step, HTTP-01 must still reach nginx.
+beeshost_ufw_allow_acme_if_active() {
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw status 2>/dev/null | grep -q "Status: active" || return 0
+  ufw allow 80/tcp comment "HTTP (Let's Encrypt)" 2>/dev/null || true
+  ufw allow 443/tcp comment "HTTPS" 2>/dev/null || true
+  info "UFW active — allowed 80/tcp and 443/tcp for Let's Encrypt and HTTPS"
+}
+
+# HTTP-only site: ACME paths must not hit SPA try_files or an apex-only HTTPS redirect.
+# Includes api.* (orchestrator) so the cert matches VITE_API_URL / CORS.
+beeshost_write_nginx_beeshost_http_site() {
+  if [ -z "${DOMAIN:-}" ]; then
+    warn "beeshost_write_nginx_beeshost_http_site: DOMAIN is not set"
+    return 1
+  fi
+
+  mkdir -p /var/www/certbot/.well-known/acme-challenge
+  chown -R www-data:www-data /var/www/certbot 2>/dev/null || true
+
+  cat >/etc/nginx/sites-available/beeshost << EOF
+server {
+    listen 80;
+    server_name panel.${DOMAIN};
+    root /var/www/panel;
+    index index.html;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+    location / { try_files \$uri \$uri/ /index.html; }
+    location /api { proxy_pass http://127.0.0.1:3000; }
+}
+
+server {
+    listen 80;
+    server_name webmail.${DOMAIN};
+    root /var/www/webmail;
+    index index.html;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+    location / { try_files \$uri \$uri/ /index.html; }
+}
+
+server {
+    listen 80;
+    server_name api.${DOMAIN};
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+
+server {
+    listen 80;
+    server_name mail.${DOMAIN};
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+    location / {
+        return 204;
+    }
+}
+
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+EOF
+  return 0
 }
 
 # Poll endpoint until ready
