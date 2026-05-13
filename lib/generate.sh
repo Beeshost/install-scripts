@@ -132,8 +132,8 @@ CRASH_POLL_CONCURRENCY=10
 
 # ── Backup service ─────────────────────────────────
 BACKUP_CONCURRENCY=5
-BACKUP_SCHEDULE=0 3 * * *
-RETENTION_CLEANUP_SCHEDULE=0 4 * * 0
+BACKUP_SCHEDULE='0 3 * * *'
+RETENTION_CLEANUP_SCHEDULE='0 4 * * 0'
 
 # ── Deployment health ──────────────────────────────
 HEALTH_CHECK_STARTUP_GRACE_MS=15000
@@ -152,7 +152,7 @@ WARNING_RENOTIFY_INTERVAL_MS=2592000000
 
 # ── Vulnerability scanner ──────────────────────────
 VULN_SCAN_CONCURRENCY=5
-VULN_SCAN_SCHEDULE=0 3 * * 2
+VULN_SCAN_SCHEDULE='0 3 * * 2'
 VULN_SCAN_TIMEOUT_MS=120000
 HIGH_RENOTIFY_INTERVAL_MS=1209600000
 
@@ -165,7 +165,7 @@ CPU_DAYS_REQUIRED=5
 DISK_DAYS_REQUIRED=3
 SUGGESTION_COOLDOWN_DAYS=30
 ANALYSIS_CONCURRENCY=20
-ANALYSIS_SCHEDULE=0 5 * * *
+ANALYSIS_SCHEDULE='0 5 * * *'
 
 # ── Cron manager ───────────────────────────────────
 CRON_MAX_JOBS_STARTER=5
@@ -199,10 +199,10 @@ TICKET_CLEANUP_AFTER_DAYS=90
 MIGRATION_TIMEOUT_MS=600000
 
 # ── Free account expiry ────────────────────────────
-FREE_ACCOUNT_EXPIRY_CHECK_SCHEDULE=0 6 * * *
+FREE_ACCOUNT_EXPIRY_CHECK_SCHEDULE='0 6 * * *'
 
 # ── WordPress ──────────────────────────────────────
-WP_UPDATE_SCHEDULE=0 3 * * 3
+WP_UPDATE_SCHEDULE='0 3 * * 3'
 
 # ── SSL / certbot ──────────────────────────────────
 ACME_CHALLENGE_INTERNAL_URL=http://127.0.0.1:3000/internal

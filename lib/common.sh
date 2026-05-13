@@ -887,21 +887,46 @@ clone_repo() {
   fi
 }
 
+# Relative path (from repo dir) to the built service entrypoint for systemd.
+beeshost_node_service_script() {
+  local dir=$1
+  local base cand u1
+
+  if [ -f "${dir}/dist/index.js" ]; then
+    printf '%s\n' "dist/index.js"
+    return 0
+  fi
+
+  base=$(basename "$dir")
+  u1="$(printf '%s' "$base" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')"
+  for cand in \
+    "${dir}/dist/${base}/src/index.js" \
+    "${dir}/dist/${u1}/src/index.js"; do
+    if [ -f "$cand" ]; then
+      printf '%s\n' "${cand#"${dir}/"}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 # Write systemd service
 write_service() {
   local name=$1
   local dir=$2
   local description=$3
+  local script
 
-  if [ ! -f "${dir}/dist/index.js" ]; then
+  if ! script=$(beeshost_node_service_script "$dir"); then
     if [ -f "/etc/systemd/system/beeshost-${name}.service" ]; then
-      warn "Removing stale beeshost-${name}.service — no ${dir}/dist/index.js (multi-package or library repo)"
+      warn "Removing stale beeshost-${name}.service — no Node entrypoint under ${dir}/dist (multi-package or library repo)"
       systemctl stop "beeshost-${name}" 2>/dev/null || true
       systemctl disable "beeshost-${name}" 2>/dev/null || true
       rm -f "/etc/systemd/system/beeshost-${name}.service"
       systemctl daemon-reload
     else
-      skip "beeshost-${name}: no ${dir}/dist/index.js (library or multi-package repo) — skipping systemd unit"
+      skip "beeshost-${name}: no Node entrypoint under ${dir}/dist (library or multi-package repo) — skipping systemd unit"
     fi
     return 0
   fi
@@ -916,7 +941,7 @@ Type=simple
 User=root
 WorkingDirectory=${dir}
 EnvironmentFile=${dir}/.env
-ExecStart=/usr/bin/node dist/index.js
+ExecStart=/usr/bin/node ${script}
 Restart=always
 RestartSec=10
 StandardOutput=journal
