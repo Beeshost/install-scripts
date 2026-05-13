@@ -71,6 +71,11 @@ generate_secrets() {
 write_defaults() {
   local env_file=$1
 
+  # Normalize any legacy unquoted cron lines already in the file (e.g. from an older installer).
+  if declare -F beeshost_repair_unquoted_cron_env_lines >/dev/null 2>&1; then
+    beeshost_repair_unquoted_cron_env_lines "$env_file"
+  fi
+
   cat >> "$env_file" << EOF
 
 # ── Service ports ──────────────────────────────────

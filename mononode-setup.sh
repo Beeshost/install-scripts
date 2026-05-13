@@ -46,6 +46,7 @@ walkthrough_email_api
 
 if [ -f /etc/beeshost/mononode.env ]; then
   section "Resume: loading /etc/beeshost/mononode.env"
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/mononode.env
   set -a
   # shellcheck source=/dev/null
   source /etc/beeshost/mononode.env
@@ -98,6 +99,7 @@ ok "Configuration saved"
 
 # Write default config values to mononode.env
 write_defaults /etc/beeshost/mononode.env
+beeshost_repair_unquoted_cron_env_lines /etc/beeshost/mononode.env
 
 # PostgreSQL
 section "Install PostgreSQL"
@@ -147,6 +149,7 @@ fi
 
 set -a
 if [ -f /etc/beeshost/mononode.env ]; then
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/mononode.env
   # shellcheck source=/dev/null
   source /etc/beeshost/mononode.env
 fi
@@ -234,6 +237,8 @@ fi
 section "Database migrations"
 if ! step_done "db-migrations"; then
   cd /opt/beeshost/postgres
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/mononode.env
+  # shellcheck source=/dev/null
   source /etc/beeshost/mononode.env
 
   run_with_retry "Run Prisma migrations" npm run migrate
@@ -270,6 +275,7 @@ if ! step_done "powerdns"; then
     exit 1
   fi
 
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/mononode.env
   set -a
   # shellcheck source=/dev/null
   source /etc/beeshost/mononode.env

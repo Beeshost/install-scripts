@@ -41,6 +41,7 @@ walkthrough_email_api
 
 if [ -f /etc/beeshost/server-a.env ]; then
   section "Resume: loading /etc/beeshost/server-a.env"
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/server-a.env
   set -a
   # shellcheck source=/dev/null
   source /etc/beeshost/server-a.env
@@ -105,6 +106,7 @@ ok "Environment saved to /etc/beeshost/server-a.env"
 
 # Write default config values to server-a.env
 write_defaults /etc/beeshost/server-a.env
+beeshost_repair_unquoted_cron_env_lines /etc/beeshost/server-a.env
 
 # Install PowerDNS
 section "Install PowerDNS"
@@ -178,8 +180,10 @@ fi
 section "Database migrations"
 if ! step_done "db-migrations"; then
   cd /opt/beeshost/postgres
+  beeshost_repair_unquoted_cron_env_lines /etc/beeshost/server-a.env
+  # shellcheck source=/dev/null
   source /etc/beeshost/server-a.env
-  
+
   run_with_retry "Run Prisma migrations" npm run migrate
   
   if [ -f "seed.ts" ] || [ -f "seed.js" ]; then

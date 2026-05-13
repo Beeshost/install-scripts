@@ -887,6 +887,21 @@ clone_repo() {
   fi
 }
 
+# Legacy write_defaults used unquoted cron values (e.g. BACKUP_SCHEDULE=0 3 * * *), which breaks
+# `source` (bash runs "3" as a command) and can confuse systemd EnvironmentFile. Idempotent fix.
+beeshost_repair_unquoted_cron_env_lines() {
+  local f=$1
+  local k
+  [ -f "$f" ] || return 0
+  for k in BACKUP_SCHEDULE RETENTION_CLEANUP_SCHEDULE VULN_SCAN_SCHEDULE ANALYSIS_SCHEDULE FREE_ACCOUNT_EXPIRY_CHECK_SCHEDULE WP_UPDATE_SCHEDULE; do
+    if grep -q "^${k}=0 " "$f" 2>/dev/null; then
+      sed -i "s|^${k}=\\(.*\\)$|${k}='\\1'|" "$f"
+      info "Repaired unquoted ${k} in $(basename "$f")"
+    fi
+  done
+  return 0
+}
+
 # Relative path (from repo dir) to the built service entrypoint for systemd.
 beeshost_node_service_script() {
   local dir=$1
@@ -916,9 +931,23 @@ write_service() {
   local name=$1
   local dir=$2
   local description=$3
-  local script
+  local script=""
 
-  if ! script=$(beeshost_node_service_script "$dir"); then
+  script=$(beeshost_node_service_script "$dir") || script=""
+
+  if [ -z "$script" ] && [ -f "${dir}/package.json" ] && grep -qE '"build"[[:space:]]*:' "${dir}/package.json" 2>/dev/null; then
+    info "beeshost-${name}: no dist/ — running npm run build in ${dir}"
+    if (
+      cd "$dir" || exit 1
+      export NODE_ENV=development
+      unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
+      run_with_retry "npm run build (${name})" npm run build
+    ); then
+      script=$(beeshost_node_service_script "$dir") || script=""
+    fi
+  fi
+
+  if [ -z "$script" ]; then
     if [ -f "/etc/systemd/system/beeshost-${name}.service" ]; then
       warn "Removing stale beeshost-${name}.service — no Node entrypoint under ${dir}/dist (multi-package or library repo)"
       systemctl stop "beeshost-${name}" 2>/dev/null || true
