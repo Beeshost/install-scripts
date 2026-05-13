@@ -879,6 +879,12 @@ clone_repo() {
     ok "Symlink $(dirname "$dest")/Postgres → $repo (for Orchestrator tsc paths)"
   fi
 
+  # AbuseMonitor imports ../Orchestrator/... while clone dir is lowercase "orchestrator".
+  if [ "$repo" = "orchestrator" ]; then
+    ln -sfn "$dest" "$(dirname "$dest")/Orchestrator"
+    ok "Symlink $(dirname "$dest")/Orchestrator → $repo (for AbuseMonitor and other siblings)"
+  fi
+
   # Install devDependencies everywhere (tsc, prisma CLI, vitest, etc.). NODE_ENV=production
   # from env files would otherwise omit devDependencies and break builds.
   if ! beeshost_npm_install_build_tree "$dest" "$repo"; then
