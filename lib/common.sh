@@ -920,6 +920,9 @@ beeshost_ensure_orchestrator_dns_deps() {
 beeshost_patch_orchestrator_admin_tickets() {
   local f=/opt/beeshost/orchestrator/src/index.ts
   [ -f "$f" ] || return 0
+  if grep -q "adminTicketRoutes(adminTicketScope)" "$f" 2>/dev/null; then
+    return 0
+  fi
   if ! grep -q 'await adminTicketRoutes(adminScope)' "$f" 2>/dev/null; then
     return 0
   fi
