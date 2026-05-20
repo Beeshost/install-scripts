@@ -745,6 +745,18 @@ beeshost_link_sibling_modules() {
   done
 }
 
+# gpgsql compat views block ALTER on pdns_* and make prisma db push try to DROP pdns_domains.
+beeshost_pdns_drop_compat_views() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    return 0
+  fi
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q <<'EOSQL' 2>/dev/null || true
+DROP VIEW IF EXISTS domains;
+DROP VIEW IF EXISTS records;
+DROP VIEW IF EXISTS supermasters;
+EOSQL
+}
+
 # PowerDNS 4.8 gpgsql queries domains.options and domains.catalog (catalog zones / PRODUCER type).
 # Symptom without these columns: communicator thread died … column domains.options does not exist
 beeshost_pdns_migrate_48_schema() {
@@ -752,14 +764,16 @@ beeshost_pdns_migrate_48_schema() {
     warn "beeshost_pdns_migrate_48_schema: DATABASE_URL not set"
     return 1
   fi
+  beeshost_pdns_drop_compat_views
   info "Migrating pdns_domains for PowerDNS 4.8 (options, catalog, type width)"
-  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"; then
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"
 ALTER TABLE pdns_domains ADD COLUMN IF NOT EXISTS options TEXT DEFAULT NULL;
 ALTER TABLE pdns_domains ADD COLUMN IF NOT EXISTS catalog TEXT DEFAULT NULL;
 ALTER TABLE pdns_domains ALTER COLUMN type TYPE TEXT;
 ALTER TABLE pdns_domains ALTER COLUMN notified_serial TYPE BIGINT USING notified_serial::bigint;
 CREATE INDEX IF NOT EXISTS pdns_catalog_idx ON pdns_domains(catalog);
 EOSQL
+  if [ "${PIPESTATUS[0]}" -eq 0 ]; then
     ok "  pdns_domains aligned with PowerDNS 4.8 gpgsql"
     return 0
   fi
@@ -775,11 +789,12 @@ beeshost_pdns_create_compat_views() {
     return 1
   fi
   info "Creating PowerDNS compat views (domains → pdns_domains, records → pdns_records)"
-  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"; then
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"
 CREATE OR REPLACE VIEW domains AS SELECT * FROM pdns_domains;
 CREATE OR REPLACE VIEW records AS SELECT * FROM pdns_records;
 CREATE OR REPLACE VIEW supermasters AS SELECT * FROM pdns_supermasters;
 EOSQL
+  if [ "${PIPESTATUS[0]}" -eq 0 ]; then
     ok "  PowerDNS compat views (domains, records, supermasters)"
     return 0
   fi
@@ -801,13 +816,14 @@ beeshost_reapply_pdns_schema() {
     warn "beeshost_reapply_pdns_schema: DATABASE_URL not set in environment"
     return 1
   fi
+  beeshost_pdns_drop_compat_views
   info "Applying $sql to \$DATABASE_URL"
-  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql" 2>&1 | tee -a "$LOG_FILE"; then
-    ok "  PowerDNS gpgsql schema applied"
-  else
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql" 2>&1 | tee -a "$LOG_FILE"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     fail "  PowerDNS gpgsql schema failed — see $LOG_FILE"
     return 1
   fi
+  ok "  PowerDNS gpgsql schema applied"
 
   info "Verifying gpgsql tables exist (public schema only):"
   local out
@@ -970,6 +986,7 @@ beeshost_prisma_db_push() {
     return 1
   fi
   info "Running prisma db push (aligns Postgres tables to schema.prisma) — irreversible if there are conflicts"
+  beeshost_pdns_drop_compat_views
   (
     cd "$pg" || exit 1
     set -a
@@ -1219,6 +1236,8 @@ EOF
 
   echo "" | tee -a "$LOG_FILE"
   info "Aligning Postgres schema with prisma/schema.prisma (db push)"
+  # Drop gpgsql compat views first — they block prisma from altering pdns_* tables.
+  beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
   # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
   beeshost_sync_prisma_clients || true
