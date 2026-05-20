@@ -4,6 +4,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${LOG_FILE:-/var/log/beeshost-install.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
@@ -41,8 +44,17 @@ set +a
 
 beeshost_write_beepanel_env
 beeshost_rebuild_beepanel
-if [ -f /opt/beeshost/orchestrator/dist/index.js ] || [ -f /opt/beeshost/orchestrator/package.json ]; then
-  info "Restart orchestrator so Firebase Admin loads the service account"
+
+orch=/opt/beeshost/orchestrator
+if [ -d "$orch" ] && [ -f "$orch/package.json" ]; then
+  info "Rebuilding orchestrator (Firebase Admin auth.ts)"
+  (
+    cd "$orch" || exit 1
+    git checkout -- src/index.ts 2>/dev/null || true
+    git pull origin main 2>&1 | tee -a "$LOG_FILE" || true
+    npm run build 2>&1 | tee -a "$LOG_FILE"
+  ) && ok "  orchestrator build complete" || fail "  orchestrator build failed — fix before using the panel API"
   systemctl restart beeshost-orchestrator 2>/dev/null || true
 fi
+
 echo "Done. Hard-refresh https://panel.${DOMAIN:-beeshost.eu} and try Google sign-in."
