@@ -966,6 +966,60 @@ beeshost_rebuild_orchestrator() {
   ) && ok "  orchestrator rebuild complete" || fail "  orchestrator rebuild failed"
 }
 
+# Vite bakes env at build time — mononode.env VITE_FIREBASE_CONFIG alone is not enough for BeePanel.
+beeshost_write_beepanel_env() {
+  local panel=/opt/beeshost/beepanel
+  [ -d "$panel" ] || return 0
+  if [ -z "${DOMAIN:-}" ]; then
+    warn "beeshost_write_beepanel_env: DOMAIN not set"
+    return 1
+  fi
+  cat >"${panel}/.env" <<EOF
+VITE_API_URL=https://api.${DOMAIN}
+VITE_FIREBASE_API_KEY=${FIREBASE_API_KEY:-}
+VITE_FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN:-}
+VITE_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+VITE_FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET:-}
+VITE_FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID:-}
+VITE_FIREBASE_APP_ID=${FIREBASE_APP_ID:-}
+VITE_FIREBASE_CONFIG={"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}
+VITE_NS1=ns1.${DOMAIN}
+VITE_NS2=ns2.${DOMAIN}
+EOF
+  chmod 600 "${panel}/.env"
+  ok "  ${panel}/.env (Vite Firebase vars)"
+}
+
+beeshost_rebuild_beepanel() {
+  local panel=/opt/beeshost/beepanel
+  [ -d "$panel" ] || return 0
+  if [ -z "${FIREBASE_API_KEY:-}" ] || [ "${FIREBASE_API_KEY}" = 'YOUR_API_KEY' ]; then
+    warn "  BeePanel: FIREBASE_API_KEY missing in mononode.env — Google login will fail until set"
+    warn "  Run: sudo bash mononode-setup.sh (Firebase web walkthrough) or edit /etc/beeshost/mononode.env"
+    return 1
+  fi
+  beeshost_write_beepanel_env || return 1
+  if [ ! -f "${panel}/package.json" ]; then
+    return 0
+  fi
+  info "Rebuilding BeePanel (npm run build → /var/www/panel)"
+  (
+    cd "$panel" || exit 1
+    export NODE_ENV=development
+    unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
+    npm run build 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) || {
+    fail "  BeePanel build failed"
+    return 1
+  }
+  if [ -d /var/www/panel ]; then
+    cp -r "${panel}/dist/"* /var/www/panel/
+    ok "  BeePanel deployed to /var/www/panel"
+  fi
+  return 0
+}
+
 # Force-sync the Postgres schema to match prisma/schema.prisma. Equivalent of:
 #   cd /opt/beeshost/postgres && DATABASE_URL=... npx prisma db push --skip-generate
 # Used when migration files are missing for some models in the schema (e.g. abusemonitor
@@ -1215,6 +1269,10 @@ EOF
     [ -d "$d" ] || continue
     local name
     name=$(basename "${d%/}")
+    # Frontends need Vite-prefixed vars written at build time, not a copy of mononode.env.
+    if [ "$name" = "beepanel" ] || [ "$name" = "webmail" ]; then
+      continue
+    fi
     # proxmox-daemon needs the PROXMOX_* block — preserve it if present, then re-append.
     preserve_block=""
     if [ "$name" = "proxmox-daemon" ] && [ -f "${d}.env" ]; then
@@ -1227,6 +1285,7 @@ EOF
     fi
     ok "  ${d}.env"
   done
+  beeshost_write_beepanel_env || true
 
   # Fix every runtime issue we've seen in journalctl on the broken box, in dependency order.
   # Each helper is idempotent and safe to re-run.
@@ -1253,6 +1312,10 @@ EOF
   echo "" | tee -a "$LOG_FILE"
   info "Orchestrator: patch duplicate /api/tickets route + rebuild"
   beeshost_rebuild_orchestrator || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "BeePanel: rebuild with Firebase web config (fixes Google sign-in)"
+  beeshost_rebuild_beepanel || true
 
   # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
   # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
