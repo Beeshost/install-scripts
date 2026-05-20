@@ -243,7 +243,9 @@ EOF
   return 0
 }
 
-# Stop systemd-resolved so PowerDNS can bind UDP/TCP 53; replace stub resolv.conf when needed.
+# Stop + mask systemd-resolved so PowerDNS can bind UDP/TCP 53; replace stub resolv.conf when needed.
+# Masking (not just disabling) is required: Debian's apt update / other tools sometimes nudge the
+# unit back to running, which races with `systemctl start pdns` and produces a hard-to-debug exit 1.
 beeshost_prepare_port53_for_powerdns() {
   if ! command -v systemctl >/dev/null 2>&1; then
     warn "beeshost_prepare_port53_for_powerdns: systemctl not in PATH (chroot/container?) — ensure nothing else holds port 53 before starting pdns"
@@ -257,6 +259,10 @@ beeshost_prepare_port53_for_powerdns() {
     if systemctl is-enabled --quiet systemd-resolved 2>/dev/null; then
       systemctl disable systemd-resolved || true
     fi
+    if ! systemctl is-enabled systemd-resolved 2>/dev/null | grep -q '^masked'; then
+      info "Masking systemd-resolved so nothing can re-bind port 53 during/after PowerDNS install"
+      systemctl mask systemd-resolved 2>/dev/null || true
+    fi
   fi
   if [ -L /etc/resolv.conf ] && [ -f /run/systemd/resolve/resolv.conf ]; then
     local target
@@ -268,7 +274,41 @@ beeshost_prepare_port53_for_powerdns() {
       chmod 644 /etc/resolv.conf
     fi
   fi
+  # Last-resort hardening: if /etc/resolv.conf points to the now-masked stub or is empty,
+  # install a sane upstream so DNS keeps working before pdns is up.
+  if [ ! -s /etc/resolv.conf ] || grep -qE '^nameserver[[:space:]]+127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    info "/etc/resolv.conf was empty or pointed at the resolved stub — writing 1.1.1.1 / 9.9.9.9 fallback"
+    rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<'EOF'
+nameserver 1.1.1.1
+nameserver 9.9.9.9
+EOF
+    chmod 644 /etc/resolv.conf
+  fi
   return 0
+}
+
+# Report what is currently holding port 53 — used after a failed pdns start so the operator
+# can see the conflict at a glance instead of digging through journalctl.
+beeshost_report_port53_holders() {
+  if command -v ss >/dev/null 2>&1; then
+    info "Listeners on port 53 (ss -lntup):"
+    ss -lntup 2>/dev/null | awk 'NR==1 || /:53 /' | sed 's/^/    /' | tee -a "$LOG_FILE"
+  elif command -v lsof >/dev/null 2>&1; then
+    info "Listeners on port 53 (lsof):"
+    lsof -i :53 2>/dev/null | sed 's/^/    /' | tee -a "$LOG_FILE"
+  fi
+}
+
+# Run pdns in foreground with the production config and print the first error line. Quick
+# replacement for diving into journalctl when systemctl restart pdns silently exits 1.
+beeshost_powerdns_dry_run() {
+  if ! command -v pdns_server >/dev/null 2>&1; then
+    return 0
+  fi
+  info "pdns_server --config-name= --daemon=no --guardian=no --loglevel=4 — first 25 lines:"
+  timeout 8 pdns_server --daemon=no --guardian=no --loglevel=4 2>&1 \
+    | head -n 25 | sed 's/^/    /' | tee -a "$LOG_FILE" || true
 }
 
 # Parse postgresql://user:password@host:port/dbname into PDNS_DB_* (password must not contain '@').
@@ -549,6 +589,11 @@ BeesHost setup — optional arguments
   --status              Show completed steps and saved state files
   --undo-last           Remove the most recently recorded step marker (safe: no apt remove)
   --undo-step=NAME      Remove marker for one step (e.g. proxmox-token-verified)
+  --diagnose            Report on every beeshost-* service: status + last 15 journal lines
+  --repair              Regenerate /etc/beeshost/*.env, re-copy to every /opt/beeshost/*/.env,
+                        reset-failed and restart all beeshost-* services, then re-print status.
+                        Use this after editing the installer to pick up the fix on an existing
+                        machine without re-running the entire wizard.
   --help                This help
 
 Typo in a prompt? Use --undo-last or --undo-step, then re-run the installer.
@@ -572,6 +617,8 @@ beeshost_parse_setup_cli_args() {
       --status) BEESHOST_SETUP_ACTION=status ;;
       --undo-last) BEESHOST_SETUP_ACTION=undo-last ;;
       --undo-step=*) BEESHOST_SETUP_ACTION=undo-step; BEESHOST_UNDO_STEP="${a#*=}" ;;
+      --diagnose) BEESHOST_SETUP_ACTION=diagnose ;;
+      --repair) BEESHOST_SETUP_ACTION=repair ;;
       --help|-h) BEESHOST_SETUP_ACTION=help ;;
     esac
   done
@@ -589,8 +636,237 @@ beeshost_handle_setup_action() {
       unmark_step "$BEESHOST_UNDO_STEP"
       exit 0
       ;;
+    diagnose) beeshost_diagnose; exit 0 ;;
+    repair) beeshost_repair; exit 0 ;;
     help) beeshost_setup_help; exit 0 ;;
   esac
+}
+
+# All BeesHost-managed systemd units that may exist on this machine.
+beeshost_all_service_units() {
+  local f
+  for f in /etc/systemd/system/beeshost-*.service; do
+    [ -f "$f" ] || continue
+    basename "$f" .service
+  done
+}
+
+# Print status + last 15 journal lines for every beeshost-* unit. Also flags common
+# mis-configurations (literal "${...}" left in env files, missing dist/index.js, etc.).
+beeshost_diagnose() {
+  section "BeesHost — diagnose"
+
+  local env_file=""
+  for f in /etc/beeshost/mononode.env /etc/beeshost/server-a.env /etc/beeshost/node.env; do
+    if [ -f "$f" ]; then
+      env_file="$f"
+      break
+    fi
+  done
+  if [ -n "$env_file" ]; then
+    info "Primary env file: $env_file"
+    if grep -nE '=\S*\$\{[A-Z_][A-Z0-9_]*\}' "$env_file" >/dev/null 2>&1; then
+      fail "$env_file contains UNEXPANDED \${VAR} references — systemd will pass them verbatim:"
+      grep -nE '=\S*\$\{[A-Z_][A-Z0-9_]*\}' "$env_file" | sed 's/^/    /' | tee -a "$LOG_FILE"
+      warn "Re-run this installer (or 'sudo bash $0 --repair') to regenerate the env file with bash-expanded values."
+    else
+      ok "$env_file has no unexpanded \${VAR} placeholders"
+    fi
+  else
+    warn "No /etc/beeshost/*.env file found — run the installer first"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "PostgreSQL:"
+  if systemctl is-active --quiet postgresql 2>/dev/null; then
+    ok "  postgresql.service is active"
+  else
+    fail "  postgresql.service is NOT active"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "PowerDNS:"
+  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+    if systemctl is-active --quiet pdns 2>/dev/null; then
+      ok "  pdns.service is active"
+    else
+      fail "  pdns.service is NOT active"
+      journalctl -u pdns -n 15 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
+      beeshost_report_port53_holders
+    fi
+  else
+    skip "  pdns.service not installed"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "BeesHost services:"
+  local any=0 unit script env_path
+  for unit in $(beeshost_all_service_units); do
+    any=1
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      ok "  ${unit} active"
+    else
+      fail "  ${unit} INACTIVE"
+      env_path=$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null | awk '{print $1}')
+      [ -n "$env_path" ] && env_path="${env_path%% *}"
+      [ -f "$env_path" ] || env_path=""
+      script=$(systemctl show -p ExecStart --value "$unit" 2>/dev/null | grep -oE '/[^ ;}]+' | head -n1)
+      [ -n "$env_path" ] && echo "    env=$env_path" | tee -a "$LOG_FILE"
+      [ -n "$script" ]   && echo "    exec=$script"  | tee -a "$LOG_FILE"
+      journalctl -u "$unit" -n 15 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
+    fi
+  done
+  if [ "$any" -eq 0 ]; then
+    warn "No beeshost-*.service units found under /etc/systemd/system/ — installer hasn't reached the systemd step yet"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Listening sockets (3000=orchestrator, 3001=daemon, 53=pdns):"
+  ss -lntp 2>/dev/null | awk 'NR==1 || /:3000 |:3001 |:53 |:8081 /' | sed 's/^/    /' | tee -a "$LOG_FILE"
+}
+
+# Idempotent fix for an existing (broken) install:
+#   1. Re-source wizard-state + generated-secrets + the existing env file (preserves all
+#      previously entered values so the user does not have to re-enter anything).
+#   2. Re-write /etc/beeshost/{mononode|server-a|node}.env via the same code paths the wizard
+#      uses, so the new (bug-fixed) write_defaults runs.
+#   3. Copy the regenerated env file into every /opt/beeshost/*/.env, preserving the
+#      proxmox-daemon "PROXMOX_HOST=…" append when it was present.
+#   4. reset-failed + restart every beeshost-* unit (and pdns, if installed).
+#   5. Run --diagnose so the operator immediately sees what is still wrong.
+beeshost_repair() {
+  section "BeesHost — repair"
+
+  if [ "$EUID" -ne 0 ]; then
+    fail "--repair must run as root (sudo)"
+    exit 1
+  fi
+
+  # Discover the env file this installer flavour writes to. mononode > server-a > node.
+  local env_file=""
+  local installer=""
+  for pair in "mononode mononode-setup.sh" "server-a server-a-setup.sh" "node node-setup.sh"; do
+    set -- $pair
+    if [ -f "/etc/beeshost/$1.env" ]; then
+      env_file="/etc/beeshost/$1.env"
+      installer="$2"
+      break
+    fi
+  done
+
+  if [ -z "$env_file" ]; then
+    fail "No /etc/beeshost/*.env file present — nothing to repair. Run the installer first."
+    exit 1
+  fi
+  info "Repair target: $env_file (installer: $installer)"
+
+  # Load every saved input the wizard remembers, plus the env file itself so any operator
+  # edits survive the regen.
+  beeshost_load_wizard_state_once
+  if [ -f /etc/beeshost/generated-secrets.env ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source /etc/beeshost/generated-secrets.env
+    set +a
+  fi
+  beeshost_repair_unquoted_cron_env_lines "$env_file"
+  set -a
+  # shellcheck source=/dev/null
+  source "$env_file"
+  set +a
+
+  if [ -z "${DOMAIN:-}" ] || [ -z "${ADMIN_EMAIL:-}" ]; then
+    fail "DOMAIN/ADMIN_EMAIL missing — cannot repair without them. Edit $env_file or /etc/beeshost/wizard-state.env."
+    exit 1
+  fi
+
+  info "Regenerating $env_file (overwriting any unexpanded \${VAR} placeholders)"
+  cat > "$env_file" << EOF
+SERVER_A_IP=${SERVER_A_IP:-${THIS_IP:-}}
+THIS_IP=${THIS_IP:-${SERVER_A_IP:-}}
+DOMAIN=${DOMAIN}
+ADMIN_EMAIL=${ADMIN_EMAIL}
+DATABASE_URL=${DATABASE_URL:-postgresql://beeshost:${DB_PASSWORD:-}@localhost:5432/beeshost}
+ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+FIREBASE_API_KEY=${FIREBASE_API_KEY:-}
+FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN:-}
+FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET:-}
+FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID:-}
+FIREBASE_APP_ID=${FIREBASE_APP_ID:-}
+FIREBASE_SERVICE_ACCOUNT_KEY=/etc/beeshost/firebase-service-account.json
+STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+PDNS_API_KEY=${PDNS_API_KEY:-}
+RESEND_API_KEY=${RESEND_API_KEY:-}
+SEND_EMAIL_WEBHOOK_URL=${SEND_EMAIL_WEBHOOK_URL:-https://api.resend.com/emails}
+ADMIN_TOKEN=${ADMIN_TOKEN:-}
+DAEMON_API_KEY=${DAEMON_API_KEY:-}
+DAEMON_HMAC_SECRET=${DAEMON_HMAC_SECRET:-}
+ALLOWED_IP=127.0.0.1
+DAEMON_PORT=${DAEMON_PORT:-3001}
+CORS_ORIGIN=https://panel.${DOMAIN}
+VITE_API_URL=https://api.${DOMAIN}
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}'
+NODE_ENV=production
+EOF
+  chmod 600 "$env_file"
+  write_defaults "$env_file"
+  beeshost_repair_unquoted_cron_env_lines "$env_file"
+  ok "Regenerated $env_file"
+
+  # Copy to each service dir.
+  info "Updating per-service /opt/beeshost/*/.env"
+  local d preserve_block=""
+  for d in /opt/beeshost/*/; do
+    [ -d "$d" ] || continue
+    local name
+    name=$(basename "${d%/}")
+    # proxmox-daemon needs the PROXMOX_* block — preserve it if present, then re-append.
+    preserve_block=""
+    if [ "$name" = "proxmox-daemon" ] && [ -f "${d}.env" ]; then
+      preserve_block=$(grep -E '^(PROXMOX_HOST|PROXMOX_TOKEN|PROXMOX_VERIFY_SSL|ALLOWED_IP)=' "${d}.env" 2>/dev/null || true)
+    fi
+    cp "$env_file" "${d}.env"
+    chmod 600 "${d}.env"
+    if [ -n "$preserve_block" ]; then
+      printf '%s\n' "$preserve_block" >> "${d}.env"
+    fi
+    ok "  ${d}.env"
+  done
+
+  # Restart everything.
+  echo "" | tee -a "$LOG_FILE"
+  info "Restarting BeesHost services"
+  systemctl daemon-reload
+  local unit
+  for unit in $(beeshost_all_service_units); do
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    if systemctl restart "$unit" 2>>"$LOG_FILE"; then
+      ok "  restart $unit"
+    else
+      fail "  restart $unit (see journalctl -u $unit -n 30)"
+    fi
+  done
+
+  # PowerDNS gets the same treatment if it's installed.
+  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+    if command -v pdns_server >/dev/null 2>&1; then
+      info "Re-running PowerDNS port-53 prep + restart"
+      beeshost_prepare_port53_for_powerdns
+      systemctl reset-failed pdns 2>/dev/null || true
+      if systemctl restart pdns 2>>"$LOG_FILE"; then
+        ok "  restart pdns"
+      else
+        fail "  restart pdns"
+        beeshost_report_port53_holders
+        journalctl -u pdns -n 15 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
+      fi
+    fi
+  fi
+
+  sleep 2
+  beeshost_diagnose
 }
 
 # Persisted wizard / prompt answers (single-line values; printf %q for safe sourcing)
@@ -970,6 +1246,7 @@ write_service() {
 [Unit]
 Description=BeesHost ${description}
 After=network.target postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=simple
@@ -987,8 +1264,14 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  systemctl enable "beeshost-${name}"
-  run_with_retry "Start beeshost-${name}" systemctl start "beeshost-${name}"
+  systemctl enable "beeshost-${name}" >/dev/null 2>&1 || true
+  # reset-failed wipes a stale "failed" state from earlier runs so restart actually retries.
+  # restart (vs. start) guarantees the new .env / unit file is picked up on re-runs.
+  systemctl reset-failed "beeshost-${name}" 2>/dev/null || true
+  if ! run_with_retry "Start beeshost-${name}" systemctl restart "beeshost-${name}"; then
+    warn "beeshost-${name} failed to start — last 15 journal lines:"
+    journalctl -u "beeshost-${name}" -n 15 --no-pager 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+  fi
 }
 
 # Proxmox pmxcfs requires the local hostname to resolve to a non-loopback IP.

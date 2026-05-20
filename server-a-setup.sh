@@ -98,7 +98,7 @@ SEND_EMAIL_WEBHOOK_URL=${SEND_EMAIL_WEBHOOK_URL}
 ADMIN_TOKEN=${ADMIN_TOKEN}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 NODE_ENV=production
 EOF
 chmod 600 /etc/beeshost/server-a.env
@@ -214,7 +214,7 @@ done
 section "Configure frontend applications"
 cat > /opt/beeshost/beepanel/.env << EOF
 VITE_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 VITE_NS1=ns1.${DOMAIN}
 VITE_NS2=ns2.${DOMAIN}
 EOF
@@ -223,7 +223,7 @@ ok "Configured beepanel"
 
 cat > /opt/beeshost/webmail/.env << EOF
 VITE_MAIL_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 EOF
 chmod 600 /opt/beeshost/webmail/.env
 ok "Configured webmail"

@@ -91,7 +91,7 @@ ALLOWED_IP=127.0.0.1
 DAEMON_PORT=${DAEMON_PORT}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 NODE_ENV=production
 EOF
 chmod 600 /etc/beeshost/mononode.env
@@ -291,10 +291,18 @@ if ! step_done "powerdns"; then
   beeshost_write_powerdns_gpgsql_conf
 
   run_with_retry "Enable PowerDNS" systemctl enable pdns
-  run_with_retry "Start PowerDNS" systemctl restart pdns
-
-  ok "PowerDNS installed (gpgsql) and listening on 53; API on 127.0.0.1:8081"
-  mark_step_done "powerdns"
+  systemctl reset-failed pdns 2>/dev/null || true
+  if run_with_retry "Start PowerDNS" systemctl restart pdns; then
+    ok "PowerDNS installed (gpgsql) and listening on 53; API on 127.0.0.1:8081"
+    mark_step_done "powerdns"
+  else
+    fail "PowerDNS failed to start — running diagnostics before continuing"
+    beeshost_report_port53_holders
+    info "Last 20 journal lines for pdns:"
+    journalctl -u pdns -n 20 --no-pager 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    beeshost_powerdns_dry_run
+    warn "Leaving the 'powerdns' step marker unset — fix the issue then re-run this script (or use --repair)"
+  fi
 fi
 
 # Mail stack
@@ -327,7 +335,7 @@ done
 section "Configure frontend applications"
 cat > /opt/beeshost/beepanel/.env << EOF
 VITE_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 VITE_NS1=ns1.${DOMAIN}
 VITE_NS2=ns2.${DOMAIN}
 EOF
@@ -336,7 +344,7 @@ ok "Configured beepanel"
 
 cat > /opt/beeshost/webmail/.env << EOF
 VITE_MAIL_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"'"${FIREBASE_API_KEY}"'","authDomain":"'"${FIREBASE_AUTH_DOMAIN}"'","projectId":"'"${FIREBASE_PROJECT_ID}"'","storageBucket":"'"${FIREBASE_STORAGE_BUCKET}"'","messagingSenderId":"'"${FIREBASE_MESSAGING_SENDER_ID}"'","appId":"'"${FIREBASE_APP_ID}"'"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
 EOF
 chmod 600 /opt/beeshost/webmail/.env
 ok "Configured webmail"

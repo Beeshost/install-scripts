@@ -68,8 +68,17 @@ generate_secrets() {
 # Write all default config values
 # These have sensible defaults and don't need user input
 # Takes one argument: the env file path to append to
+#
+# NOTE: This heredoc uses unquoted EOF so bash expands ${DOMAIN} etc. at write
+# time. We must NOT use \${DOMAIN} — systemd EnvironmentFile does not expand
+# variables, so a literal "ns1.${DOMAIN}" in the file becomes the actual env
+# value for the service, breaking every consumer that validates domain shape.
 write_defaults() {
   local env_file=$1
+
+  if [ -z "${DOMAIN:-}" ]; then
+    warn "write_defaults: DOMAIN is not set — host/domain-derived defaults (NS1_HOSTNAME, MAIL_DOMAIN, …) will be incomplete"
+  fi
 
   # Normalize any legacy unquoted cron lines already in the file (e.g. from an older installer).
   if declare -F beeshost_repair_unquoted_cron_env_lines >/dev/null 2>&1; then
@@ -88,15 +97,15 @@ TICKET_SERVICE_PORT=3005
 
 # ── DNS ────────────────────────────────────────────
 PDNS_API_URL=http://127.0.0.1:8081
-NS1_HOSTNAME=ns1.\${DOMAIN}
-NS2_HOSTNAME=ns2.\${DOMAIN}
+NS1_HOSTNAME=ns1.${DOMAIN}
+NS2_HOSTNAME=ns2.${DOMAIN}
 DEFAULT_TTL=3600
 MIN_TTL=300
 MAX_TTL=86400
 
 # ── Mail ───────────────────────────────────────────
-MAIL_DOMAIN=\${DOMAIN}
-MAIL_SERVER_HOSTNAME=mail.\${DOMAIN}
+MAIL_DOMAIN=${DOMAIN}
+MAIL_SERVER_HOSTNAME=mail.${DOMAIN}
 DKIM_KEY_PATH=/etc/opendkim/keys
 MAIL_STORAGE_PATH=/var/mail/vhosts
 DOVECOT_HOST=127.0.0.1
