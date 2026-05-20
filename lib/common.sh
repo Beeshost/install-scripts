@@ -952,9 +952,35 @@ PY
   ok "  orchestrator src/index.ts patched (admin tickets → /api/admin)"
 }
 
+# Orchestrator must load the Firebase service account JSON or every panel API call returns 401.
+beeshost_ensure_orchestrator_firebase_env() {
+  local envf=/opt/beeshost/orchestrator/.env
+  local sa="${FIREBASE_SERVICE_ACCOUNT_KEY:-/etc/beeshost/firebase-service-account.json}"
+  [ -f "$envf" ] || return 0
+  if [ ! -f "$sa" ]; then
+    warn "  $sa missing — panel Google login will work in Firebase but API calls return 401"
+    warn "  Firebase Console → Project settings → Service accounts → Generate new private key → save as $sa"
+    return 1
+  fi
+  if grep -q '^GOOGLE_APPLICATION_CREDENTIALS=' "$envf" 2>/dev/null; then
+    sed -i "s|^GOOGLE_APPLICATION_CREDENTIALS=.*|GOOGLE_APPLICATION_CREDENTIALS=${sa}|" "$envf"
+  else
+    echo "GOOGLE_APPLICATION_CREDENTIALS=${sa}" >>"$envf"
+  fi
+  if [ -n "${FIREBASE_PROJECT_ID:-}" ]; then
+    if grep -q '^FIREBASE_PROJECT_ID=' "$envf" 2>/dev/null; then
+      sed -i "s|^FIREBASE_PROJECT_ID=.*|FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}|" "$envf"
+    else
+      echo "FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}" >>"$envf"
+    fi
+  fi
+  ok "  orchestrator .env: Firebase service account configured"
+}
+
 beeshost_rebuild_orchestrator() {
   local orch=/opt/beeshost/orchestrator
   [ -d "$orch" ] || return 0
+  beeshost_ensure_orchestrator_firebase_env || true
   beeshost_patch_orchestrator_admin_tickets || true
   if [ ! -f "$orch/package.json" ]; then
     return 0
@@ -1119,6 +1145,29 @@ beeshost_diagnose() {
     ok "  postgresql.service is active"
   else
     fail "  postgresql.service is NOT active"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Panel API auth (Firebase Admin — 401 on /api/* logs you out of the panel):"
+  local sa="${FIREBASE_SERVICE_ACCOUNT_KEY:-/etc/beeshost/firebase-service-account.json}"
+  if [ -f "$sa" ]; then
+    ok "  service account file: $sa"
+  else
+    fail "  missing $sa — install Firebase private key JSON (panel Google login will 401)"
+  fi
+  if [ -n "${FIREBASE_PROJECT_ID:-}" ]; then
+    ok "  FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}"
+  else
+    warn "  FIREBASE_PROJECT_ID not set in environment"
+  fi
+  if systemctl is-active --quiet beeshost-orchestrator 2>/dev/null; then
+    if journalctl -u beeshost-orchestrator -n 80 --no-pager 2>/dev/null | grep -q 'Firebase Admin initialized (service account'; then
+      ok "  orchestrator journal: Firebase Admin loaded service account"
+    elif journalctl -u beeshost-orchestrator -n 80 --no-pager 2>/dev/null | grep -q 'projectId only'; then
+      fail "  orchestrator journal: Firebase Admin running WITHOUT service account (401 expected)"
+    else
+      warn "  orchestrator journal: no Firebase Admin init line yet — trigger a panel login"
+    fi
   fi
 
   echo "" | tee -a "$LOG_FILE"
