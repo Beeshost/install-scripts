@@ -41,4 +41,8 @@ set +a
 
 beeshost_write_beepanel_env
 beeshost_rebuild_beepanel
+if [ -f /opt/beeshost/orchestrator/dist/index.js ] || [ -f /opt/beeshost/orchestrator/package.json ]; then
+  info "Restart orchestrator so Firebase Admin loads the service account"
+  systemctl restart beeshost-orchestrator 2>/dev/null || true
+fi
 echo "Done. Hard-refresh https://panel.${DOMAIN:-beeshost.eu} and try Google sign-in."

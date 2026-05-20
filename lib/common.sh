@@ -989,7 +989,7 @@ beeshost_write_beepanel_env() {
     return 1
   fi
   cat >"${panel}/.env" <<EOF
-VITE_API_URL=https://api.${DOMAIN}
+VITE_API_URL=/api
 VITE_FIREBASE_API_KEY=${FIREBASE_API_KEY:-}
 VITE_FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN:-}
 VITE_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
@@ -1270,7 +1270,7 @@ PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
 PROXMOX_VERIFY_SSL=false
 ORCHESTRATOR_API_KEY=${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}
 CORS_ORIGIN=https://panel.${DOMAIN}
-VITE_API_URL=https://api.${DOMAIN}
+VITE_API_URL=/api
 VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}","measurementId":"${FIREBASE_MEASUREMENT_ID:-}"}'
 NODE_ENV=production
 EOF
