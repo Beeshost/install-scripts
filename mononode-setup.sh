@@ -100,6 +100,7 @@ DAEMON_PORT=${DAEMON_PORT}
 PROXMOX_HOST=https://localhost:8006
 PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
 PROXMOX_VERIFY_SSL=false
+ORCHESTRATOR_API_KEY=${ADMIN_TOKEN}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
 VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
@@ -390,6 +391,9 @@ beeshost_link_sibling_modules
 
 # Orchestrator dist/dns/checker requires dns2 at runtime (see dns/checker/package.json).
 beeshost_ensure_orchestrator_dns_deps || true
+
+# Admin + client ticket routes must not both register GET /api/tickets.
+beeshost_rebuild_orchestrator || true
 
 # Mirror the generated Prisma client into every consumer. This is normally done by
 # beeshost_npm_install_build_tree right after `prisma generate`, but re-runs (which skip

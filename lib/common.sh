@@ -348,6 +348,11 @@ gpgsql-dbname=${PDNS_DB_NAME}
 gpgsql-user=${PDNS_DB_USER}
 gpgsql-password=${PDNS_DB_PASSWORD}
 
+# BeesHost dns/setup/db-setup.sql creates pdns_* tables (not legacy domains/records).
+gpgsql-domains-table=pdns_domains
+gpgsql-records-table=pdns_records
+gpgsql-supermasters-table=pdns_supermasters
+
 local-address=0.0.0.0
 local-port=53
 
@@ -773,10 +778,10 @@ beeshost_reapply_pdns_schema() {
   out=$(psql "$DATABASE_URL" -tAc \
     "SELECT table_name FROM information_schema.tables \
      WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
-     AND table_name IN ('domains','records','supermasters','comments','domainmetadata','cryptokeys','tsigkeys') \
+     AND table_name IN ('pdns_domains','pdns_records','pdns_supermasters') \
      ORDER BY table_name;" 2>&1)
   if [ -z "$out" ]; then
-    fail "  No PowerDNS tables in public schema — db-setup.sql may have failed silently"
+    fail "  No PowerDNS pdns_* tables in public schema — db-setup.sql may have failed silently"
     return 1
   fi
   printf '%s\n' "$out" | sed 's/^/    public./' | tee -a "$LOG_FILE"
@@ -786,19 +791,19 @@ beeshost_reapply_pdns_schema() {
     # search_path=information_schema,public which breaks gpgsql entirely.
     if grep -q '^gpgsql-extra-connection-parameters=' /etc/powerdns/pdns.conf 2>/dev/null; then
       sed -i '/^gpgsql-extra-connection-parameters=/d' /etc/powerdns/pdns.conf
-      ok "  removed gpgsql-extra-connection-parameters from pdns.conf (tables are in public)"
+      ok "  removed gpgsql-extra-connection-parameters from pdns.conf"
     fi
   fi
 
-  if ! printf '%s\n' "$out" | grep -qx 'domains'; then
-    fail "  public.domains table missing after db-setup.sql"
+  if ! printf '%s\n' "$out" | grep -qx 'pdns_domains'; then
+    fail "  public.pdns_domains table missing after db-setup.sql"
     return 1
   fi
-  if ! printf '%s\n' "$out" | grep -qx 'records'; then
-    fail "  public.records table missing after db-setup.sql"
+  if ! printf '%s\n' "$out" | grep -qx 'pdns_records'; then
+    fail "  public.pdns_records table missing after db-setup.sql"
     return 1
   fi
-  ok "  public.domains and public.records verified"
+  ok "  public.pdns_domains and public.pdns_records verified"
 }
 
 # Orchestrator bundles dns/checker at dist/dns/checker; runtime.js does require('dns2').
@@ -838,6 +843,57 @@ beeshost_ensure_orchestrator_dns_deps() {
     npm install dns2@^2.1.0 --save --omit=dev 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
     exit "${PIPESTATUS[0]}"
   ) && ok "  npm install dns2 (orchestrator)" || fail "  npm install dns2 (orchestrator)"
+}
+
+# Orchestrator mounted adminTicketRoutes on the same /api prefix as clientTicketRoutes,
+# so both registered GET /api/tickets → Fastify throws on startup.
+beeshost_patch_orchestrator_admin_tickets() {
+  local f=/opt/beeshost/orchestrator/src/index.ts
+  [ -f "$f" ] || return 0
+  if ! grep -q 'await adminTicketRoutes(adminScope)' "$f" 2>/dev/null; then
+    return 0
+  fi
+  info "Patching orchestrator: mount admin tickets at /api/admin/tickets"
+  python3 - "$f" <<'PY' || return 1
+import sys
+path = sys.argv[1]
+text = open(path, encoding='utf-8').read()
+old = """  apiScope.register(async function (adminScope) {
+    adminScope.addHook('preHandler', adminMiddleware);
+    await adminRoutes(adminScope);
+    await adminTicketRoutes(adminScope);
+  });"""
+new = """  apiScope.register(async function (adminScope) {
+    adminScope.addHook('preHandler', adminMiddleware);
+    await adminRoutes(adminScope);
+  });
+  apiScope.register(async function (adminTicketScope) {
+    adminTicketScope.addHook('preHandler', adminMiddleware);
+    await adminTicketRoutes(adminTicketScope);
+  }, { prefix: '/admin' });"""
+if old not in text:
+    sys.exit(0)
+open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
+print('patched')
+PY
+  ok "  orchestrator src/index.ts patched (admin tickets → /api/admin)"
+}
+
+beeshost_rebuild_orchestrator() {
+  local orch=/opt/beeshost/orchestrator
+  [ -d "$orch" ] || return 0
+  beeshost_patch_orchestrator_admin_tickets || true
+  if [ ! -f "$orch/package.json" ]; then
+    return 0
+  fi
+  info "Rebuilding orchestrator (npm run build)"
+  (
+    cd "$orch" || exit 1
+    export NODE_ENV=development
+    unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
+    npm run build 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) && ok "  orchestrator rebuild complete" || fail "  orchestrator rebuild failed"
 }
 
 # Force-sync the Postgres schema to match prisma/schema.prisma. Equivalent of:
@@ -1070,6 +1126,7 @@ DAEMON_PORT=${DAEMON_PORT:-3001}
 PROXMOX_HOST=${PROXMOX_HOST:-https://localhost:8006}
 PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
 PROXMOX_VERIFY_SSL=false
+ORCHESTRATOR_API_KEY=${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
 VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}'
@@ -1119,6 +1176,10 @@ EOF
   echo "" | tee -a "$LOG_FILE"
   info "Orchestrator runtime deps (dns2 for bundled dns/checker)"
   beeshost_ensure_orchestrator_dns_deps || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Orchestrator: patch duplicate /api/tickets route + rebuild"
+  beeshost_rebuild_orchestrator || true
 
   # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
   # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
