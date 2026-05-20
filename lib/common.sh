@@ -683,32 +683,150 @@ beeshost_sync_prisma_clients() {
   done
 }
 
-# Create node_modules symlinks for sibling repos that are imported as bare module specifiers
-# (e.g. `import "proxmox-wrapper/dist/index.js"` in compiled JS). TypeScript path mappings
-# don't get rewritten on emit, so the runtime needs to resolve via real node_modules entries.
-# Runtime symptom this fixes:
-#   Startup error: Cannot find module '/opt/beeshost/proxmox-daemon/proxmox-wrapper/dist/index.js'
+# Create symlinks for sibling repos imported by their package name.
+#
+# Two distinct symlink locations are needed depending on how the compiled JS emits the
+# import:
+#
+#   1. node_modules/<sibling>  — for bare ESM specifiers, e.g.
+#        import "proxmox-wrapper/dist/index.js"
+#      Node ESM resolves bare names through node_modules.
+#
+#   2. <consumer-root>/<sibling> — for relative imports where the compiled JS
+#      output paths are short by one level, e.g.
+#        import "../proxmox-wrapper/dist/index.js"   // from dist/index.js
+#      From `dist/`, `..` lands at `<consumer-root>/`, so Node looks for
+#      `<consumer-root>/proxmox-wrapper/dist/index.js`. (The "Did you mean
+#      ../../proxmox-wrapper/dist/index.js" hint is Node spotting the missing `..`.)
+#      Adding a root-level symlink makes the relative import resolve without
+#      patching the source code.
+#
+# We create BOTH symlinks; each is harmless if the other one is the path actually used.
 beeshost_link_sibling_modules() {
   local pairs=(
-    "proxmox-daemon/proxmox-wrapper:/opt/beeshost/proxmox-wrapper"
-    "orchestrator/proxmox-wrapper:/opt/beeshost/proxmox-wrapper"
+    "proxmox-daemon proxmox-wrapper"
+    "orchestrator   proxmox-wrapper"
   )
-  local pair link target
+  local pair consumer sibling consumer_dir target nm_link root_link
   for pair in "${pairs[@]}"; do
-    link="/opt/beeshost/${pair%%:*}"
-    target="${pair##*:}"
-    local consumer="${link%/*}"
-    [ -d "$consumer" ] || continue
-    [ -d "$target" ] || { warn "beeshost_link_sibling_modules: target missing for $link → $target"; continue; }
-    mkdir -p "${consumer}/node_modules"
-    link="${consumer}/node_modules/${pair##*/}"
-    if [ -L "$link" ] || [ -e "$link" ]; then
-      rm -rf "$link"
+    # shellcheck disable=SC2086
+    set -- $pair
+    consumer="$1"
+    sibling="$2"
+    consumer_dir="/opt/beeshost/${consumer}"
+    target="/opt/beeshost/${sibling}"
+    [ -d "$consumer_dir" ] || continue
+    [ -d "$target" ] || { warn "beeshost_link_sibling_modules: target missing $target — clone $sibling first"; continue; }
+
+    # 1) node_modules/<sibling>
+    mkdir -p "${consumer_dir}/node_modules"
+    nm_link="${consumer_dir}/node_modules/${sibling}"
+    if [ -L "$nm_link" ] || [ -e "$nm_link" ]; then
+      rm -rf "$nm_link"
     fi
-    ln -sfn "$target" "$link" \
-      && ok "  symlink ${link} → ${target}" \
-      || fail "  symlink ${link} → ${target}"
+    if ln -sfn "$target" "$nm_link"; then
+      ok "  symlink ${nm_link} → ${target}"
+    else
+      fail "  symlink ${nm_link} → ${target}"
+    fi
+
+    # 2) <consumer_dir>/<sibling>
+    root_link="${consumer_dir}/${sibling}"
+    if [ -L "$root_link" ] || [ -e "$root_link" ]; then
+      rm -rf "$root_link"
+    fi
+    if ln -sfn "$target" "$root_link"; then
+      ok "  symlink ${root_link} → ${target}"
+    else
+      fail "  symlink ${root_link} → ${target}"
+    fi
   done
+}
+
+# Apply /opt/beeshost/dns/setup/db-setup.sql against $DATABASE_URL and verify the
+# canonical PowerDNS gpgsql tables (domains, records) ended up in the public schema.
+# Runtime symptom this fixes:
+#   PDNSException ... ERROR: relation "domains" does not exist
+beeshost_reapply_pdns_schema() {
+  local sql=/opt/beeshost/dns/setup/db-setup.sql
+  if [ ! -f "$sql" ]; then
+    warn "beeshost_reapply_pdns_schema: $sql missing — dns repo not cloned yet"
+    return 1
+  fi
+  if [ -z "${DATABASE_URL:-}" ]; then
+    warn "beeshost_reapply_pdns_schema: DATABASE_URL not set in environment"
+    return 1
+  fi
+  info "Applying $sql to \$DATABASE_URL"
+  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$sql" 2>&1 | tee -a "$LOG_FILE"; then
+    ok "  PowerDNS gpgsql schema applied"
+  else
+    fail "  PowerDNS gpgsql schema failed — see $LOG_FILE"
+    return 1
+  fi
+
+  info "Verifying gpgsql tables exist:"
+  local out
+  out=$(psql "$DATABASE_URL" -tAc "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_name IN ('domains','records','supermasters','comments','domainmetadata','cryptokeys','tsigkeys') ORDER BY table_schema, table_name;" 2>&1)
+  if [ -z "$out" ]; then
+    fail "  No PowerDNS tables found in \$DATABASE_URL — the schema script may target a non-public schema"
+    return 1
+  fi
+  printf '%s\n' "$out" | sed 's/^/    /' | tee -a "$LOG_FILE"
+
+  # If the tables are NOT in public, pdns.conf needs gpgsql-extra-connection-parameters
+  # with options=-csearch_path=… so the unqualified SELECTs work. Detect and fix.
+  if ! printf '%s\n' "$out" | grep -qE '^public\.domains$'; then
+    local schema
+    schema=$(printf '%s\n' "$out" | awk -F. '/\.domains$/ {print $1; exit}')
+    if [ -n "$schema" ] && [ -f /etc/powerdns/pdns.conf ]; then
+      info "  domains table lives in schema '$schema' (not public) — appending search_path to pdns.conf"
+      # Strip any previous line we wrote, then append a fresh one.
+      sed -i '/^gpgsql-extra-connection-parameters=/d' /etc/powerdns/pdns.conf
+      echo "gpgsql-extra-connection-parameters=options='-csearch_path=${schema},public'" >> /etc/powerdns/pdns.conf
+      ok "  pdns.conf now sets search_path=${schema},public"
+    fi
+  fi
+}
+
+# Force-sync the Postgres schema to match prisma/schema.prisma. Equivalent of:
+#   cd /opt/beeshost/postgres && DATABASE_URL=... npx prisma db push --skip-generate
+# Used when migration files are missing for some models in the schema (e.g. abusemonitor
+# blowing up with: P2021 table 'public.ContainerMetricSnapshot' does not exist).
+beeshost_prisma_db_push() {
+  local pg=/opt/beeshost/postgres
+  if [ ! -d "$pg" ]; then
+    warn "beeshost_prisma_db_push: $pg missing — clone the postgres repo first"
+    return 1
+  fi
+  if [ ! -f "$pg/prisma/schema.prisma" ]; then
+    warn "beeshost_prisma_db_push: $pg/prisma/schema.prisma missing"
+    return 1
+  fi
+  local prisma_bin="$pg/node_modules/.bin/prisma"
+  if [ ! -x "$prisma_bin" ]; then
+    warn "beeshost_prisma_db_push: $prisma_bin not executable — run 'npm install' in $pg first"
+    return 1
+  fi
+  info "Running prisma db push (aligns Postgres tables to schema.prisma) — irreversible if there are conflicts"
+  (
+    cd "$pg" || exit 1
+    set -a
+    # shellcheck source=/dev/null
+    source /etc/beeshost/mononode.env 2>/dev/null \
+      || source /etc/beeshost/server-a.env 2>/dev/null \
+      || true
+    set +a
+    "$prisma_bin" db push --skip-generate --accept-data-loss 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  )
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok "  prisma db push completed"
+  else
+    fail "  prisma db push failed (exit $rc) — services may still report P2021"
+  fi
+  return "$rc"
 }
 
 # All BeesHost-managed systemd units that may exist on this machine.
@@ -769,21 +887,40 @@ beeshost_diagnose() {
 
   echo "" | tee -a "$LOG_FILE"
   info "BeesHost services:"
-  local any=0 unit script env_path
+  local any=0 unit script env_path exit_status exit_code last_msg
   for unit in $(beeshost_all_service_units); do
     any=1
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       ok "  ${unit} active"
-    else
-      fail "  ${unit} INACTIVE"
-      env_path=$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null | awk '{print $1}')
-      [ -n "$env_path" ] && env_path="${env_path%% *}"
-      [ -f "$env_path" ] || env_path=""
-      script=$(systemctl show -p ExecStart --value "$unit" 2>/dev/null | grep -oE '/[^ ;}]+' | head -n1)
-      [ -n "$env_path" ] && echo "    env=$env_path" | tee -a "$LOG_FILE"
-      [ -n "$script" ]   && echo "    exec=$script"  | tee -a "$LOG_FILE"
-      journalctl -u "$unit" -n 15 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
+      continue
     fi
+
+    # Distinguish "exited cleanly (status=0)" from "crashed (status>0)" using the most recent
+    # journal record. A unit that keeps exiting 0 is almost certainly a one-shot/cron task
+    # incorrectly declared as Restart=always — call that out instead of flagging it as broken.
+    exit_status=$(systemctl show -p ExecMainStatus --value "$unit" 2>/dev/null)
+    exit_code=$(systemctl show -p ExecMainCode --value "$unit" 2>/dev/null)
+    last_msg=$(journalctl -u "$unit" -n 50 --no-pager 2>/dev/null \
+      | grep -E 'Deactivated successfully|Failed with result|Main process exited|Error:|throw new Error' \
+      | tail -n 1)
+
+    if [ "$exit_status" = "0" ] && printf '%s' "$last_msg" | grep -q 'Deactivated successfully'; then
+      warn "  ${unit} exits cleanly (status=0) — looks like a one-shot or cron-style task"
+      warn "        \"Restart=always\" cycles it every 10s. Convert to a oneshot+timer if intentional."
+      continue
+    fi
+
+    fail "  ${unit} INACTIVE (last ExecMainStatus=${exit_status:-?} code=${exit_code:-?})"
+    env_path=$(systemctl show -p EnvironmentFiles --value "$unit" 2>/dev/null | awk '{print $1}')
+    [ -n "$env_path" ] && env_path="${env_path%% *}"
+    [ -f "$env_path" ] || env_path=""
+    script=$(systemctl show -p ExecStart --value "$unit" 2>/dev/null | grep -oE '/[^ ;}]+' | head -n1)
+    [ -n "$env_path" ] && echo "    env=$env_path" | tee -a "$LOG_FILE"
+    [ -n "$script" ]   && echo "    exec=$script"  | tee -a "$LOG_FILE"
+    # 40 lines (not 15) so we catch the top of the stack trace — the actual "Cannot find
+    # module 'X'" / "throw new Error('Y')" line is usually 20-30 lines above the systemd
+    # "Main process exited" footer.
+    journalctl -u "$unit" -n 40 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
   done
   if [ "$any" -eq 0 ]; then
     warn "No beeshost-*.service units found under /etc/systemd/system/ — installer hasn't reached the systemd step yet"
@@ -912,29 +1049,35 @@ EOF
     ok "  ${d}.env"
   done
 
-  # Fix the runtime issues we observed in journalctl on the broken box, in dependency order:
-  #   1. Sync the Prisma client into every consumer's node_modules (the schema's default
-  #      output puts it in postgres/'s node_modules; consumers' own copy is the empty stub).
-  #   2. Symlink sibling repos into node_modules where the compiled JS uses bare specifiers
-  #      ("proxmox-wrapper/dist/index.js" etc.).
-  #   3. Re-write PowerDNS config — older versions of this installer wrote `recursive-cache-ttl`,
-  #      which pdns-server 4.8 rejects with "Trying to set unknown setting".
+  # Fix every runtime issue we've seen in journalctl on the broken box, in dependency order.
+  # Each helper is idempotent and safe to re-run.
   echo "" | tee -a "$LOG_FILE"
   info "Syncing Prisma generated client into each consumer"
   beeshost_sync_prisma_clients || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Creating node_modules symlinks for sibling-package imports"
+  info "Aligning Postgres schema with prisma/schema.prisma (db push)"
+  beeshost_prisma_db_push || true
+  # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
+  beeshost_sync_prisma_clients || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Creating sibling-package symlinks (node_modules/<sibling> AND <consumer>/<sibling>)"
   beeshost_link_sibling_modules || true
 
-  # Re-write the pdns config from current env so the new (sanitised) settings land. Only do
-  # this if PowerDNS is actually installed and we have DATABASE_URL handy.
+  # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
+  # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
+  # that db-setup.sql actually created the `domains` table.
   if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service' && [ -n "${DATABASE_URL:-}" ] && [ -n "${PDNS_API_KEY:-}" ]; then
     echo "" | tee -a "$LOG_FILE"
     info "Re-writing /etc/powerdns/pdns.conf (drops recursor-only settings)"
     beeshost_pdns_gpgsql_vars_from_database_url "$DATABASE_URL"
     beeshost_write_powerdns_gpgsql_conf
     ok "  pdns.conf regenerated"
+
+    echo "" | tee -a "$LOG_FILE"
+    info "Re-applying PowerDNS gpgsql schema (creates domains/records tables if missing)"
+    beeshost_reapply_pdns_schema || true
   fi
 
   # Restart everything.
