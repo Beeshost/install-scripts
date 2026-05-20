@@ -516,8 +516,10 @@ if ! step_done "node-self-registered"; then
 fi
 
 # Verify all services
+# Sleep 5 (not 2): services with Restart=always need a moment after the last restart cycle to
+# either reach steady-state or hit their final crash; reading journal too early misses the error.
 section "Verify services"
-sleep 2
+sleep 5
 
 for service in "${!ALL_SERVICE_DESCRIPTIONS[@]}"; do
   if [ ! -f "/etc/systemd/system/beeshost-${service}.service" ]; then
@@ -527,8 +529,12 @@ for service in "${!ALL_SERVICE_DESCRIPTIONS[@]}"; do
   if systemctl is-active --quiet "beeshost-${service}" 2>/dev/null; then
     ok "beeshost-${service} running"
   else
-    warn "beeshost-${service} not running"
-    fail "Check logs: journalctl -u beeshost-${service} -n 20"
+    warn "beeshost-${service} not running — last 20 journal lines:"
+    # Inline the journal output. The previous "Check logs: …" message forced the operator to
+    # run journalctl manually for every failing unit; for 12 failing units in a row that loses
+    # the actual stack trace in scroll-back. Streaming inline keeps everything in the setup log.
+    journalctl -u "beeshost-${service}" -n 20 --no-pager 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
     STEPS_FAILED+=("beeshost-${service}")
   fi
 done

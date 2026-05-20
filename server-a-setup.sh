@@ -342,7 +342,7 @@ fi
 
 # Verify all services
 section "Verify services"
-sleep 3  # Give services time to start
+sleep 5  # services with Restart=always need a moment to settle / hit their final crash
 
 for service in "${!SERVICE_DESCRIPTIONS[@]}"; do
   if [ ! -f "/etc/systemd/system/beeshost-${service}.service" ]; then
@@ -353,7 +353,9 @@ for service in "${!SERVICE_DESCRIPTIONS[@]}"; do
     ok "beeshost-${service} is running"
     STEPS_OK+=("beeshost-${service}")
   else
-    fail "beeshost-${service} not running"
+    warn "beeshost-${service} not running — last 20 journal lines:"
+    journalctl -u "beeshost-${service}" -n 20 --no-pager 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
     STEPS_FAILED+=("beeshost-${service}")
   fi
 done
