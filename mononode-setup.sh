@@ -301,9 +301,11 @@ if ! step_done "powerdns"; then
     exit 1
   fi
 
-  run_with_retry "PowerDNS PostgreSQL schema" psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /opt/beeshost/dns/setup/db-setup.sql
-
   beeshost_pdns_gpgsql_vars_from_database_url "$DATABASE_URL"
+  if ! beeshost_reapply_pdns_schema; then
+    fail "PowerDNS PostgreSQL schema setup failed"
+    STEPS_FAILED+=("PowerDNS PostgreSQL schema")
+  fi
   beeshost_write_powerdns_gpgsql_conf
 
   run_with_retry "Enable PowerDNS" systemctl enable pdns
@@ -385,6 +387,9 @@ fi
 # specifiers like `import "proxmox-wrapper/dist/index.js"` which Node only resolves through
 # node_modules. Idempotent.
 beeshost_link_sibling_modules
+
+# Orchestrator dist/dns/checker requires dns2 at runtime (see dns/checker/package.json).
+beeshost_ensure_orchestrator_dns_deps || true
 
 # Mirror the generated Prisma client into every consumer. This is normally done by
 # beeshost_npm_install_build_tree right after `prisma generate`, but re-runs (which skip

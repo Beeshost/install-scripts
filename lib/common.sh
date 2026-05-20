@@ -765,28 +765,79 @@ beeshost_reapply_pdns_schema() {
     return 1
   fi
 
-  info "Verifying gpgsql tables exist:"
+  info "Verifying gpgsql tables exist (public schema only):"
   local out
-  out=$(psql "$DATABASE_URL" -tAc "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_name IN ('domains','records','supermasters','comments','domainmetadata','cryptokeys','tsigkeys') ORDER BY table_schema, table_name;" 2>&1)
+  # MUST filter table_schema = 'public'. Without it, PostgreSQL's built-in
+  # information_schema.domains view matches table_name='domains' and we wrongly set
+  # search_path=information_schema — then pdns can't find public.records.
+  out=$(psql "$DATABASE_URL" -tAc \
+    "SELECT table_name FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
+     AND table_name IN ('domains','records','supermasters','comments','domainmetadata','cryptokeys','tsigkeys') \
+     ORDER BY table_name;" 2>&1)
   if [ -z "$out" ]; then
-    fail "  No PowerDNS tables found in \$DATABASE_URL — the schema script may target a non-public schema"
+    fail "  No PowerDNS tables in public schema — db-setup.sql may have failed silently"
     return 1
   fi
-  printf '%s\n' "$out" | sed 's/^/    /' | tee -a "$LOG_FILE"
+  printf '%s\n' "$out" | sed 's/^/    public./' | tee -a "$LOG_FILE"
 
-  # If the tables are NOT in public, pdns.conf needs gpgsql-extra-connection-parameters
-  # with options=-csearch_path=… so the unqualified SELECTs work. Detect and fix.
-  if ! printf '%s\n' "$out" | grep -qE '^public\.domains$'; then
-    local schema
-    schema=$(printf '%s\n' "$out" | awk -F. '/\.domains$/ {print $1; exit}')
-    if [ -n "$schema" ] && [ -f /etc/powerdns/pdns.conf ]; then
-      info "  domains table lives in schema '$schema' (not public) — appending search_path to pdns.conf"
-      # Strip any previous line we wrote, then append a fresh one.
+  if [ -f /etc/powerdns/pdns.conf ]; then
+    # Remove any search_path line a previous (buggy) installer run added — especially
+    # search_path=information_schema,public which breaks gpgsql entirely.
+    if grep -q '^gpgsql-extra-connection-parameters=' /etc/powerdns/pdns.conf 2>/dev/null; then
       sed -i '/^gpgsql-extra-connection-parameters=/d' /etc/powerdns/pdns.conf
-      echo "gpgsql-extra-connection-parameters=options='-csearch_path=${schema},public'" >> /etc/powerdns/pdns.conf
-      ok "  pdns.conf now sets search_path=${schema},public"
+      ok "  removed gpgsql-extra-connection-parameters from pdns.conf (tables are in public)"
     fi
   fi
+
+  if ! printf '%s\n' "$out" | grep -qx 'domains'; then
+    fail "  public.domains table missing after db-setup.sql"
+    return 1
+  fi
+  if ! printf '%s\n' "$out" | grep -qx 'records'; then
+    fail "  public.records table missing after db-setup.sql"
+    return 1
+  fi
+  ok "  public.domains and public.records verified"
+}
+
+# Orchestrator bundles dns/checker at dist/dns/checker; runtime.js does require('dns2').
+# dns2 is only listed in dns/checker/package.json — not orchestrator's — so Node looks in
+# /opt/beeshost/orchestrator/node_modules and fails with MODULE_NOT_FOUND.
+beeshost_ensure_orchestrator_dns_deps() {
+  local orch=/opt/beeshost/orchestrator
+  local checker_nm=/opt/beeshost/dns/checker/node_modules/dns2
+  [ -d "$orch" ] || return 0
+
+  if [ -d "$checker_nm" ]; then
+    mkdir -p "${orch}/node_modules"
+    local link="${orch}/node_modules/dns2"
+    if [ -L "$link" ] || [ -e "$link" ]; then
+      rm -rf "$link"
+    fi
+    if ln -sfn "$checker_nm" "$link"; then
+      ok "  symlink ${link} → ${checker_nm}"
+      return 0
+    fi
+  fi
+
+  if [ -d "${orch}/node_modules/dns2" ]; then
+    ok "  orchestrator already has node_modules/dns2"
+    return 0
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "beeshost_ensure_orchestrator_dns_deps: npm missing and dns/checker has no dns2 — orchestrator will fail"
+    return 1
+  fi
+
+  info "Installing dns2 into orchestrator (bundled dns/checker runtime dependency)"
+  (
+    cd "$orch" || exit 1
+    export NODE_ENV=development
+    npm install dns2@^2.1.0 --save --omit=dev 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) && ok "  npm install dns2 (orchestrator)" || fail "  npm install dns2 (orchestrator)"
 }
 
 # Force-sync the Postgres schema to match prisma/schema.prisma. Equivalent of:
@@ -1064,6 +1115,10 @@ EOF
   echo "" | tee -a "$LOG_FILE"
   info "Creating sibling-package symlinks (node_modules/<sibling> AND <consumer>/<sibling>)"
   beeshost_link_sibling_modules || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Orchestrator runtime deps (dns2 for bundled dns/checker)"
+  beeshost_ensure_orchestrator_dns_deps || true
 
   # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
   # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
