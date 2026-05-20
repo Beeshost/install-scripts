@@ -348,10 +348,7 @@ gpgsql-dbname=${PDNS_DB_NAME}
 gpgsql-user=${PDNS_DB_USER}
 gpgsql-password=${PDNS_DB_PASSWORD}
 
-# BeesHost dns/setup/db-setup.sql creates pdns_* tables (not legacy domains/records).
-gpgsql-domains-table=pdns_domains
-gpgsql-records-table=pdns_records
-gpgsql-supermasters-table=pdns_supermasters
+# gpgsql expects relations named domains/records/supermasters (see beeshost_pdns_create_compat_views).
 
 local-address=0.0.0.0
 local-port=53
@@ -748,6 +745,26 @@ beeshost_link_sibling_modules() {
   done
 }
 
+# gpgsql hard-codes relation names domains/records/supermasters. BeesHost physical tables are pdns_*.
+# PowerDNS 4.8 does not accept gpgsql-domains-table in pdns.conf — use simple updatable views instead.
+beeshost_pdns_create_compat_views() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    warn "beeshost_pdns_create_compat_views: DATABASE_URL not set"
+    return 1
+  fi
+  info "Creating PowerDNS compat views (domains → pdns_domains, records → pdns_records)"
+  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"; then
+CREATE OR REPLACE VIEW domains AS SELECT * FROM pdns_domains;
+CREATE OR REPLACE VIEW records AS SELECT * FROM pdns_records;
+CREATE OR REPLACE VIEW supermasters AS SELECT * FROM pdns_supermasters;
+EOSQL
+    ok "  PowerDNS compat views (domains, records, supermasters)"
+    return 0
+  fi
+  fail "  PowerDNS compat views failed — see $LOG_FILE"
+  return 1
+}
+
 # Apply /opt/beeshost/dns/setup/db-setup.sql against $DATABASE_URL and verify the
 # canonical PowerDNS gpgsql tables (domains, records) ended up in the public schema.
 # Runtime symptom this fixes:
@@ -804,6 +821,20 @@ beeshost_reapply_pdns_schema() {
     return 1
   fi
   ok "  public.pdns_domains and public.pdns_records verified"
+
+  beeshost_pdns_create_compat_views || return 1
+
+  out=$(psql "$DATABASE_URL" -tAc \
+    "SELECT table_name FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_type = 'VIEW' \
+     AND table_name IN ('domains','records','supermasters') \
+     ORDER BY table_name;" 2>&1)
+  if [ -z "$out" ]; then
+    fail "  PowerDNS compat views missing in public schema"
+    return 1
+  fi
+  printf '%s\n' "$out" | sed 's/^/    public./' | tee -a "$LOG_FILE"
+  ok "  public.domains and public.records views verified for gpgsql"
 }
 
 # Orchestrator bundles dns/checker at dist/dns/checker; runtime.js does require('dns2').
