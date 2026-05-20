@@ -745,6 +745,28 @@ beeshost_link_sibling_modules() {
   done
 }
 
+# PowerDNS 4.8 gpgsql queries domains.options and domains.catalog (catalog zones / PRODUCER type).
+# Symptom without these columns: communicator thread died … column domains.options does not exist
+beeshost_pdns_migrate_48_schema() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    warn "beeshost_pdns_migrate_48_schema: DATABASE_URL not set"
+    return 1
+  fi
+  info "Migrating pdns_domains for PowerDNS 4.8 (options, catalog, type width)"
+  if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"; then
+ALTER TABLE pdns_domains ADD COLUMN IF NOT EXISTS options TEXT DEFAULT NULL;
+ALTER TABLE pdns_domains ADD COLUMN IF NOT EXISTS catalog TEXT DEFAULT NULL;
+ALTER TABLE pdns_domains ALTER COLUMN type TYPE TEXT;
+ALTER TABLE pdns_domains ALTER COLUMN notified_serial TYPE BIGINT USING notified_serial::bigint;
+CREATE INDEX IF NOT EXISTS pdns_catalog_idx ON pdns_domains(catalog);
+EOSQL
+    ok "  pdns_domains aligned with PowerDNS 4.8 gpgsql"
+    return 0
+  fi
+  fail "  pdns_domains 4.8 migration failed — see $LOG_FILE"
+  return 1
+}
+
 # gpgsql hard-codes relation names domains/records/supermasters. BeesHost physical tables are pdns_*.
 # PowerDNS 4.8 does not accept gpgsql-domains-table in pdns.conf — use simple updatable views instead.
 beeshost_pdns_create_compat_views() {
@@ -822,6 +844,7 @@ beeshost_reapply_pdns_schema() {
   fi
   ok "  public.pdns_domains and public.pdns_records verified"
 
+  beeshost_pdns_migrate_48_schema || return 1
   beeshost_pdns_create_compat_views || return 1
 
   out=$(psql "$DATABASE_URL" -tAc \
