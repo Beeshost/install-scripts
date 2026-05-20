@@ -64,6 +64,14 @@ prompt ADMIN_EMAIL "Admin email address"
 DAEMON_PORT="3001"
 
 # Save combined env
+# PROXMOX_TOKEN may already be on disk from a previous run; load it before writing so the
+# orchestrator (and any other consumer of proxmox-wrapper) receives PROXMOX_HOST/PROXMOX_TOKEN
+# via mononode.env. The token is later re-confirmed by the "Configure Proxmox API token"
+# step on a fresh install — see line ~190.
+if [ -f /etc/beeshost/proxmox-api-token.env ]; then
+  # shellcheck source=/dev/null
+  source /etc/beeshost/proxmox-api-token.env
+fi
 section "Save environment configuration"
 cat > /etc/beeshost/mononode.env << EOF
 SERVER_A_IP=${THIS_IP}
@@ -89,6 +97,9 @@ DAEMON_API_KEY=${DAEMON_API_KEY}
 DAEMON_HMAC_SECRET=${DAEMON_HMAC_SECRET}
 ALLOWED_IP=127.0.0.1
 DAEMON_PORT=${DAEMON_PORT}
+PROXMOX_HOST=https://localhost:8006
+PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
+PROXMOX_VERIFY_SSL=false
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
 VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_AUTH_DOMAIN}","projectId":"${FIREBASE_PROJECT_ID}","storageBucket":"${FIREBASE_STORAGE_BUCKET}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID}","appId":"${FIREBASE_APP_ID}"}'
@@ -349,8 +360,12 @@ EOF
 chmod 600 /opt/beeshost/webmail/.env
 ok "Configured webmail"
 
-# Daemon-specific additions (idempotent on re-runs)
-if [ -f /opt/beeshost/proxmox-daemon/.env ] && grep -q '^PROXMOX_HOST=' /opt/beeshost/proxmox-daemon/.env 2>/dev/null; then
+# Daemon-specific additions (idempotent on re-runs).
+# mononode.env now already carries PROXMOX_HOST/PROXMOX_TOKEN/PROXMOX_VERIFY_SSL (orchestrator
+# also needs them), so usually we have nothing to add here. We only append the daemon-only
+# ALLOWED_IP override (and PROXMOX_HOST/PROXMOX_TOKEN as a fallback for older mononode.env
+# files that pre-date the inclusion).
+if grep -q '^PROXMOX_HOST=' /opt/beeshost/proxmox-daemon/.env 2>/dev/null; then
   info "proxmox-daemon .env already has Proxmox connection block — skipping append"
 else
   cat >> /opt/beeshost/proxmox-daemon/.env << EOF
@@ -360,6 +375,16 @@ PROXMOX_VERIFY_SSL=false
 ALLOWED_IP=127.0.0.1
 EOF
 fi
+
+# Sibling-package symlinks (proxmox-wrapper, …) — needed because compiled JS uses bare
+# specifiers like `import "proxmox-wrapper/dist/index.js"` which Node only resolves through
+# node_modules. Idempotent.
+beeshost_link_sibling_modules
+
+# Mirror the generated Prisma client into every consumer. This is normally done by
+# beeshost_npm_install_build_tree right after `prisma generate`, but re-runs (which skip
+# the cloning step) need this to land in case /opt/beeshost/postgres/ was rebuilt since.
+beeshost_sync_prisma_clients
 
 # Install all services
 section "Install systemd services"

@@ -329,6 +329,13 @@ beeshost_pdns_gpgsql_vars_from_database_url() {
 }
 
 # Write /etc/powerdns/pdns.conf for gpgsql + local API (expects PDNS_DB_* and PDNS_API_KEY).
+#
+# IMPORTANT: This is the authoritative server (pdns_server), not the recursor.
+# Settings like `recursive-cache-ttl` belong to pdns-recursor and were removed from
+# pdns-server in 4.5+; including them now causes:
+#    Fatal error: Trying to set unknown setting 'recursive-cache-ttl'
+# and the service exit-loops forever. `allow-recursion=` is similarly recursor-only.
+# Keep this file to settings the authoritative server actually accepts.
 beeshost_write_powerdns_gpgsql_conf() {
   local target=/etc/powerdns/pdns.conf
   install -d -m 0755 /etc/powerdns
@@ -347,7 +354,6 @@ local-port=53
 master=yes
 slave=no
 
-recursive-cache-ttl=0
 cache-ttl=20
 negquery-cache-ttl=60
 
@@ -359,7 +365,6 @@ webserver-port=8081
 webserver-allow-from=127.0.0.1
 
 disable-axfr=yes
-allow-recursion=
 EOF
   umask 022
   chmod 640 "$target"
@@ -642,6 +647,70 @@ beeshost_handle_setup_action() {
   esac
 }
 
+# Copy the generated Prisma client from /opt/beeshost/postgres/node_modules/.prisma/client/
+# into every other /opt/beeshost/*/node_modules/.prisma/client/. Idempotent — re-running on
+# an already-synced tree is a no-op (cp -a overwrites with identical content).
+# Runtime symptom this fixes:
+#   Error: @prisma/client did not initialize yet. Please run "prisma generate" and try to import it again.
+#     at new PrismaClient (/opt/beeshost/<svc>/node_modules/.prisma/client/default.js:43:11)
+beeshost_sync_prisma_clients() {
+  local src="/opt/beeshost/postgres/node_modules/.prisma/client"
+  if [ ! -d "$src" ]; then
+    warn "beeshost_sync_prisma_clients: source missing — run 'cd /opt/beeshost/postgres && npm run generate' first ($src)"
+    return 1
+  fi
+  local d name
+  for d in /opt/beeshost/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "${d%/}")
+    case "$name" in
+      postgres|Postgres) continue ;;     # source of truth
+      Orchestrator) continue ;;          # symlink → orchestrator
+    esac
+    if [ ! -d "${d}node_modules/@prisma/client" ]; then
+      continue                            # not a Prisma consumer
+    fi
+    if [ -f "${d}prisma/schema.prisma" ]; then
+      continue                            # owns its own schema (mailproxy, mailserver, dns/ns-handler)
+    fi
+    mkdir -p "${d}node_modules/.prisma"
+    rm -rf "${d}node_modules/.prisma/client"
+    if cp -a "$src" "${d}node_modules/.prisma/" 2>/dev/null; then
+      ok "  prisma client → ${d}node_modules/.prisma/client"
+    else
+      fail "  prisma client → ${d}node_modules/.prisma/client (copy failed)"
+    fi
+  done
+}
+
+# Create node_modules symlinks for sibling repos that are imported as bare module specifiers
+# (e.g. `import "proxmox-wrapper/dist/index.js"` in compiled JS). TypeScript path mappings
+# don't get rewritten on emit, so the runtime needs to resolve via real node_modules entries.
+# Runtime symptom this fixes:
+#   Startup error: Cannot find module '/opt/beeshost/proxmox-daemon/proxmox-wrapper/dist/index.js'
+beeshost_link_sibling_modules() {
+  local pairs=(
+    "proxmox-daemon/proxmox-wrapper:/opt/beeshost/proxmox-wrapper"
+    "orchestrator/proxmox-wrapper:/opt/beeshost/proxmox-wrapper"
+  )
+  local pair link target
+  for pair in "${pairs[@]}"; do
+    link="/opt/beeshost/${pair%%:*}"
+    target="${pair##*:}"
+    local consumer="${link%/*}"
+    [ -d "$consumer" ] || continue
+    [ -d "$target" ] || { warn "beeshost_link_sibling_modules: target missing for $link → $target"; continue; }
+    mkdir -p "${consumer}/node_modules"
+    link="${consumer}/node_modules/${pair##*/}"
+    if [ -L "$link" ] || [ -e "$link" ]; then
+      rm -rf "$link"
+    fi
+    ln -sfn "$target" "$link" \
+      && ok "  symlink ${link} → ${target}" \
+      || fail "  symlink ${link} → ${target}"
+  done
+}
+
 # All BeesHost-managed systemd units that may exist on this machine.
 beeshost_all_service_units() {
   local f
@@ -769,6 +838,11 @@ beeshost_repair() {
     source /etc/beeshost/generated-secrets.env
     set +a
   fi
+  if [ -f /etc/beeshost/proxmox-api-token.env ]; then
+    # PROXMOX_TOKEN — needed by orchestrator + any service consuming proxmox-wrapper.
+    # shellcheck source=/dev/null
+    source /etc/beeshost/proxmox-api-token.env
+  fi
   beeshost_repair_unquoted_cron_env_lines "$env_file"
   set -a
   # shellcheck source=/dev/null
@@ -805,6 +879,9 @@ DAEMON_API_KEY=${DAEMON_API_KEY:-}
 DAEMON_HMAC_SECRET=${DAEMON_HMAC_SECRET:-}
 ALLOWED_IP=127.0.0.1
 DAEMON_PORT=${DAEMON_PORT:-3001}
+PROXMOX_HOST=${PROXMOX_HOST:-https://localhost:8006}
+PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
+PROXMOX_VERIFY_SSL=false
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
 VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}'
@@ -834,6 +911,31 @@ EOF
     fi
     ok "  ${d}.env"
   done
+
+  # Fix the runtime issues we observed in journalctl on the broken box, in dependency order:
+  #   1. Sync the Prisma client into every consumer's node_modules (the schema's default
+  #      output puts it in postgres/'s node_modules; consumers' own copy is the empty stub).
+  #   2. Symlink sibling repos into node_modules where the compiled JS uses bare specifiers
+  #      ("proxmox-wrapper/dist/index.js" etc.).
+  #   3. Re-write PowerDNS config — older versions of this installer wrote `recursive-cache-ttl`,
+  #      which pdns-server 4.8 rejects with "Trying to set unknown setting".
+  echo "" | tee -a "$LOG_FILE"
+  info "Syncing Prisma generated client into each consumer"
+  beeshost_sync_prisma_clients || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Creating node_modules symlinks for sibling-package imports"
+  beeshost_link_sibling_modules || true
+
+  # Re-write the pdns config from current env so the new (sanitised) settings land. Only do
+  # this if PowerDNS is actually installed and we have DATABASE_URL handy.
+  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service' && [ -n "${DATABASE_URL:-}" ] && [ -n "${PDNS_API_KEY:-}" ]; then
+    echo "" | tee -a "$LOG_FILE"
+    info "Re-writing /etc/powerdns/pdns.conf (drops recursor-only settings)"
+    beeshost_pdns_gpgsql_vars_from_database_url "$DATABASE_URL"
+    beeshost_write_powerdns_gpgsql_conf
+    ok "  pdns.conf regenerated"
+  fi
 
   # Restart everything.
   echo "" | tee -a "$LOG_FILE"
@@ -865,7 +967,7 @@ EOF
     fi
   fi
 
-  sleep 2
+  sleep 3
   beeshost_diagnose
 }
 
@@ -1034,11 +1136,12 @@ beeshost_npm_install_build_tree() {
 
       if [ -f package.json ] && grep -q '"@prisma/client"' package.json && [ ! -f prisma/schema.prisma ]; then
         local schema_path prisma_bin pg_home
+        pg_home=""
         for schema_path in "../Postgres/prisma/schema.prisma" "../postgres/prisma/schema.prisma"; do
           if [ -f "$schema_path" ]; then
+            pg_home=$(cd "$dir" && cd "$(dirname "$(dirname "$schema_path")")" && pwd)
             prisma_bin="./node_modules/.bin/prisma"
             if [ ! -x "$prisma_bin" ]; then
-              pg_home=$(cd "$dir" && cd "$(dirname "$(dirname "$schema_path")")" && pwd)
               if [ -x "$pg_home/node_modules/.bin/prisma" ]; then
                 prisma_bin="$pg_home/node_modules/.bin/prisma"
               fi
@@ -1051,6 +1154,19 @@ beeshost_npm_install_build_tree() {
             else
               warn "prisma generate ($rel_dir): no local prisma CLI and npx missing"
               exit 1
+            fi
+
+            # `prisma generate --schema=../Postgres/prisma/schema.prisma` writes the generated
+            # client into postgres/node_modules/.prisma/client (the default output is relative
+            # to the schema, not the CWD). At runtime the consumer's stub at
+            # ${dir}/node_modules/.prisma/client/default.js still throws "did not initialize".
+            # Mirror the populated directory over so the stub finds the real client next to it.
+            if [ "$pg_home" != "$dir" ] && [ -d "$pg_home/node_modules/.prisma/client" ]; then
+              mkdir -p "$dir/node_modules/.prisma"
+              rm -rf "$dir/node_modules/.prisma/client"
+              cp -a "$pg_home/node_modules/.prisma/client" "$dir/node_modules/.prisma/" \
+                && ok "mirrored .prisma/client into $rel_dir" \
+                || warn "failed to mirror .prisma/client into $rel_dir"
             fi
             break
           fi
