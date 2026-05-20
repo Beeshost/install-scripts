@@ -966,6 +966,20 @@ beeshost_rebuild_orchestrator() {
   ) && ok "  orchestrator rebuild complete" || fail "  orchestrator rebuild failed"
 }
 
+# BeesHost production Firebase web app (besshost-aba1e). Used when mononode.env has no FIREBASE_API_KEY.
+beeshost_firebase_web_defaults() {
+  if [ -n "${FIREBASE_API_KEY:-}" ] && [ "${FIREBASE_API_KEY}" != 'YOUR_API_KEY' ]; then
+    return 0
+  fi
+  export FIREBASE_API_KEY='AIzaSyA12LZuU2ZzWqNK6WFeQ0etVBzlOtTBh48'
+  export FIREBASE_AUTH_DOMAIN='besshost-aba1e.firebaseapp.com'
+  export FIREBASE_PROJECT_ID='besshost-aba1e'
+  export FIREBASE_STORAGE_BUCKET='besshost-aba1e.firebasestorage.app'
+  export FIREBASE_MESSAGING_SENDER_ID='213649936721'
+  export FIREBASE_APP_ID='1:213649936721:web:cf447609ffb9302790c370'
+  export FIREBASE_MEASUREMENT_ID='G-KKHGSQ2QTV'
+}
+
 # Vite bakes env at build time — mononode.env VITE_FIREBASE_CONFIG alone is not enough for BeePanel.
 beeshost_write_beepanel_env() {
   local panel=/opt/beeshost/beepanel
@@ -982,7 +996,8 @@ VITE_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
 VITE_FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET:-}
 VITE_FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID:-}
 VITE_FIREBASE_APP_ID=${FIREBASE_APP_ID:-}
-VITE_FIREBASE_CONFIG={"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}
+VITE_FIREBASE_MEASUREMENT_ID=${FIREBASE_MEASUREMENT_ID:-}
+VITE_FIREBASE_CONFIG={"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}","measurementId":"${FIREBASE_MEASUREMENT_ID:-}"}
 VITE_NS1=ns1.${DOMAIN}
 VITE_NS2=ns2.${DOMAIN}
 EOF
@@ -1217,6 +1232,7 @@ beeshost_repair() {
   # shellcheck source=/dev/null
   source "$env_file"
   set +a
+  beeshost_firebase_web_defaults
 
   if [ -z "${DOMAIN:-}" ] || [ -z "${ADMIN_EMAIL:-}" ]; then
     fail "DOMAIN/ADMIN_EMAIL missing — cannot repair without them. Edit $env_file or /etc/beeshost/wizard-state.env."
@@ -1237,6 +1253,7 @@ FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN:-}
 FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET:-}
 FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID:-}
 FIREBASE_APP_ID=${FIREBASE_APP_ID:-}
+FIREBASE_MEASUREMENT_ID=${FIREBASE_MEASUREMENT_ID:-}
 FIREBASE_SERVICE_ACCOUNT_KEY=/etc/beeshost/firebase-service-account.json
 STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
 STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
@@ -1254,7 +1271,7 @@ PROXMOX_VERIFY_SSL=false
 ORCHESTRATOR_API_KEY=${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=https://api.${DOMAIN}
-VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}"}'
+VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY:-}","authDomain":"${FIREBASE_AUTH_DOMAIN:-}","projectId":"${FIREBASE_PROJECT_ID:-}","storageBucket":"${FIREBASE_STORAGE_BUCKET:-}","messagingSenderId":"${FIREBASE_MESSAGING_SENDER_ID:-}","appId":"${FIREBASE_APP_ID:-}","measurementId":"${FIREBASE_MEASUREMENT_ID:-}"}'
 NODE_ENV=production
 EOF
   chmod 600 "$env_file"
