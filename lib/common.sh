@@ -1386,6 +1386,8 @@ EOF
   info "BeePanel: rebuild with Firebase web config (fixes Google sign-in)"
   beeshost_rebuild_beepanel || true
 
+  beeshost_ensure_nginx_panel_api_proxy || true
+
   # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
   # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
   # that db-setup.sql actually created the `domains` table.
@@ -1964,6 +1966,36 @@ beeshost_ufw_allow_acme_if_active() {
   ufw allow 80/tcp comment "HTTP (Let's Encrypt)" 2>/dev/null || true
   ufw allow 443/tcp comment "HTTPS" 2>/dev/null || true
   info "UFW active — allowed 80/tcp and 443/tcp for Let's Encrypt and HTTPS"
+}
+
+# Certbot HTTPS blocks often omit /api — panel then 401/HTML breaks auth. Include this snippet on panel.* servers.
+beeshost_ensure_nginx_panel_api_proxy() {
+  if [ -z "${DOMAIN:-}" ]; then
+    return 0
+  fi
+  mkdir -p /etc/nginx/snippets
+  cat >/etc/nginx/snippets/beeshost-panel-api.conf <<'EOF'
+location ^~ /api/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Authorization $http_authorization;
+}
+EOF
+  local f=/etc/nginx/sites-available/beeshost
+  [ -f "$f" ] || return 0
+  if ! grep -q 'beeshost-panel-api.conf' "$f" 2>/dev/null; then
+    sed -i "/server_name panel\./a \    include snippets/beeshost-panel-api.conf;" "$f"
+    ok "  nginx: panel /api/ → orchestrator:3000 (HTTPS + HTTP)"
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx 2>/dev/null || true
+    else
+      warn "  nginx -t failed after panel api snippet — run: nginx -t"
+    fi
+  fi
 }
 
 # HTTP-only site: ACME paths must not hit SPA try_files or an apex-only HTTPS redirect.
