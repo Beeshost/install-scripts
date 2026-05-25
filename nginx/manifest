@@ -1,0 +1,4 @@
+# BeesHost nginx manifest — one snippet path per line (relative to install-scripts root).
+# beeshost-update.sh installs each into /etc/nginx/snippets/<basename> and ensures
+# panel sites include snippets/beeshost-panel-api.conf when present.
+nginx/snippets/beeshost-panel-api.conf

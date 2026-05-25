@@ -601,6 +601,8 @@ BeesHost setup — optional arguments
                         reset-failed and restart all beeshost-* services, then re-print status.
                         Use this after editing the installer to pick up the fix on an existing
                         machine without re-running the entire wizard.
+  --update              Git pull all /opt/beeshost repos + install-scripts, apply nginx manifest,
+                        rebuild orchestrator + BeePanel, restart services (same as beeshost-update.sh).
   --help                This help
 
 Typo in a prompt? Use --undo-last or --undo-step, then re-run the installer.
@@ -626,6 +628,7 @@ beeshost_parse_setup_cli_args() {
       --undo-step=*) BEESHOST_SETUP_ACTION=undo-step; BEESHOST_UNDO_STEP="${a#*=}" ;;
       --diagnose) BEESHOST_SETUP_ACTION=diagnose ;;
       --repair) BEESHOST_SETUP_ACTION=repair ;;
+      --update) BEESHOST_SETUP_ACTION=update ;;
       --help|-h) BEESHOST_SETUP_ACTION=help ;;
     esac
   done
@@ -645,6 +648,7 @@ beeshost_handle_setup_action() {
       ;;
     diagnose) beeshost_diagnose; exit 0 ;;
     repair) beeshost_repair; exit 0 ;;
+    update) beeshost_full_update; exit 0 ;;
     help) beeshost_setup_help; exit 0 ;;
   esac
 }
@@ -1228,6 +1232,97 @@ beeshost_diagnose() {
   echo "" | tee -a "$LOG_FILE"
   info "Listening sockets (3000=orchestrator, 3001=daemon, 53=pdns):"
   ss -lntp 2>/dev/null | awk 'NR==1 || /:3000 |:3001 |:53 |:8081 /' | sed 's/^/    /' | tee -a "$LOG_FILE"
+}
+
+# Pull latest code for all BeesHost git clones, apply nginx manifest, rebuild, restart.
+beeshost_full_update() {
+  section "BeesHost — full update"
+
+  if [ "$EUID" -ne 0 ]; then
+    fail "beeshost-update must run as root (sudo)"
+    exit 1
+  fi
+
+  local scripts_root="${BEESHOST_SCRIPTS_ROOT:-}"
+  if [ -z "$scripts_root" ]; then
+    if [ -d /opt/beeshost/scripts ]; then scripts_root=/opt/beeshost/scripts
+    elif [ -d "$HOME/install-scripts" ]; then scripts_root="$HOME/install-scripts"
+    else scripts_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    fi
+  fi
+  export BEESHOST_SCRIPTS_ROOT="$scripts_root"
+  info "Scripts root: $scripts_root"
+
+  for f in /etc/beeshost/mononode.env /etc/beeshost/server-a.env /etc/beeshost/node.env; do
+    if [ -f "$f" ]; then
+      set -a
+      # shellcheck source=/dev/null
+      source "$f" 2>/dev/null || true
+      set +a
+      break
+    fi
+  done
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Pulling install-scripts"
+  if [ -d "$scripts_root/.git" ]; then
+    beeshost_git_sync_repo "$scripts_root" "install-scripts" || warn "install-scripts pull failed"
+  else
+    warn "  $scripts_root is not a git clone — skip pull"
+  fi
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Pulling /opt/beeshost repositories"
+  local repo_dir name slug
+  for repo_dir in /opt/beeshost/*; do
+    [ -d "$repo_dir/.git" ] || continue
+    name=$(basename "$repo_dir")
+    case "$name" in scripts|Scripts) continue ;;
+    slug=$(beeshost_github_repo_slug "$name")
+    info "  git pull: $name"
+    beeshost_git_sync_repo "$repo_dir" "$slug" || warn "  pull failed for $name"
+  done
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Applying nginx manifest"
+  beeshost_apply_nginx_manifest "$scripts_root" || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Syncing Prisma client + schema"
+  beeshost_sync_prisma_clients || true
+  beeshost_pdns_drop_compat_views
+  beeshost_prisma_db_push || true
+  beeshost_sync_prisma_clients || true
+  beeshost_link_sibling_modules || true
+  beeshost_ensure_orchestrator_dns_deps || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Rebuilding orchestrator + BeePanel"
+  beeshost_rebuild_orchestrator || true
+  beeshost_rebuild_beepanel || true
+
+  echo "" | tee -a "$LOG_FILE"
+  info "Restarting BeesHost services"
+  systemctl daemon-reload
+  local unit
+  for unit in $(beeshost_all_service_units); do
+    systemctl reset-failed "$unit" 2>/dev/null || true
+    if systemctl restart "$unit" 2>>"$LOG_FILE"; then
+      ok "  restart $unit"
+    else
+      fail "  restart $unit (see journalctl -u $unit -n 30)"
+    fi
+  done
+
+  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+    if systemctl is-enabled --quiet pdns 2>/dev/null; then
+      systemctl restart pdns 2>/dev/null || true
+    fi
+  fi
+
+  sleep 2
+  beeshost_diagnose
+  ok "Full update complete"
 }
 
 # Idempotent fix for an existing (broken) install:
@@ -1969,12 +2064,93 @@ beeshost_ufw_allow_acme_if_active() {
 }
 
 # Certbot HTTPS blocks often omit /api — panel then 401/HTML breaks auth. Include this snippet on panel.* servers.
+beeshost_apply_nginx_manifest() {
+  local scripts_root=${1:-}
+  [ -n "$scripts_root" ] || scripts_root="${BEESHOST_SCRIPTS_ROOT:-}"
+  [ -n "$scripts_root" ] || scripts_root="/opt/beeshost/scripts"
+  [ -d "$scripts_root" ] || scripts_root="$HOME/install-scripts"
+  [ -d "$scripts_root" ] || {
+    warn "beeshost_apply_nginx_manifest: scripts root not found"
+    return 1
+  }
+
+  local manifest="$scripts_root/nginx/manifest"
+  [ -f "$manifest" ] || {
+    warn "beeshost_apply_nginx_manifest: no manifest at $manifest"
+    return 0
+  }
+
+  mkdir -p /etc/nginx/snippets
+  local rel base src dst
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    rel="${rel%%#*}"
+    rel="${rel#"${rel%%[![:space:]]*}"}"
+    rel="${rel%"${rel##*[![:space:]]}"}"
+    [ -n "$rel" ] || continue
+    src="$scripts_root/$rel"
+    base=$(basename "$rel")
+    dst="/etc/nginx/snippets/$base"
+    if [ ! -f "$src" ]; then
+      warn "  nginx manifest: missing $src"
+      continue
+    fi
+    cp "$src" "$dst"
+    ok "  nginx snippet: $dst"
+  done <"$manifest"
+
+  # Per-repo optional update.nginx (one path per line, same as manifest entries)
+  local repo_dir update_file
+  for repo_dir in /opt/beeshost/* "$HOME/install-scripts"; do
+    [ -d "$repo_dir" ] || continue
+    update_file="$repo_dir/update.nginx"
+    [ -f "$update_file" ] || continue
+    info "Applying nginx updates from $(basename "$repo_dir")/update.nginx"
+    while IFS= read -r rel || [ -n "$rel" ]; do
+      rel="${rel%%#*}"
+      rel="${rel#"${rel%%[![:space:]]*}"}"
+      rel="${rel%"${rel##*[![:space:]]}"}"
+      [ -n "$rel" ] || continue
+      if [ -f "$rel" ]; then
+        src="$rel"
+      elif [ -f "$repo_dir/$rel" ]; then
+        src="$repo_dir/$rel"
+      else
+        warn "  update.nginx: missing $rel (from $(basename "$repo_dir"))"
+        continue
+      fi
+      base=$(basename "$src")
+      dst="/etc/nginx/snippets/$base"
+      cp "$src" "$dst"
+      ok "  nginx snippet: $dst (from $(basename "$repo_dir"))"
+    done <"$update_file"
+  done
+
+  local f=/etc/nginx/sites-available/beeshost
+  [ -f "$f" ] || return 0
+  if ! grep -q 'beeshost-panel-api.conf' "$f" 2>/dev/null; then
+    sed -i "/server_name panel\./a \    include snippets/beeshost-panel-api.conf;" "$f"
+    ok "  nginx: added panel API include to $(basename "$f")"
+  fi
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx 2>/dev/null || true
+    ok "  nginx reloaded"
+  else
+    warn "  nginx -t failed after manifest apply — run: nginx -t"
+    return 1
+  fi
+}
+
 beeshost_ensure_nginx_panel_api_proxy() {
   if [ -z "${DOMAIN:-}" ]; then
     return 0
   fi
-  mkdir -p /etc/nginx/snippets
-  cat >/etc/nginx/snippets/beeshost-panel-api.conf <<'EOF'
+  local scripts_root="${BEESHOST_SCRIPTS_ROOT:-}"
+  [ -n "$scripts_root" ] || [ -d /opt/beeshost/scripts ] && scripts_root=/opt/beeshost/scripts
+  [ -n "$scripts_root" ] || [ -d "$HOME/install-scripts" ] && scripts_root="$HOME/install-scripts"
+  [ -n "$scripts_root" ] || scripts_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+  BEESHOST_SCRIPTS_ROOT="$scripts_root" beeshost_apply_nginx_manifest "$scripts_root" || {
+    mkdir -p /etc/nginx/snippets
+    cat >/etc/nginx/snippets/beeshost-panel-api.conf <<'EOF'
 location ^~ /api/ {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
@@ -1988,17 +2164,18 @@ location ^~ /api/ {
     proxy_read_timeout 86400;
 }
 EOF
-  local f=/etc/nginx/sites-available/beeshost
-  [ -f "$f" ] || return 0
-  if ! grep -q 'beeshost-panel-api.conf' "$f" 2>/dev/null; then
-    sed -i "/server_name panel\./a \    include snippets/beeshost-panel-api.conf;" "$f"
-    ok "  nginx: panel /api/ → orchestrator:3000 (HTTPS + HTTP)"
-    if nginx -t >/dev/null 2>&1; then
-      systemctl reload nginx 2>/dev/null || true
-    else
-      warn "  nginx -t failed after panel api snippet — run: nginx -t"
+    local f=/etc/nginx/sites-available/beeshost
+    [ -f "$f" ] || return 0
+    if ! grep -q 'beeshost-panel-api.conf' "$f" 2>/dev/null; then
+      sed -i "/server_name panel\./a \    include snippets/beeshost-panel-api.conf;" "$f"
+      ok "  nginx: panel /api/ → orchestrator:3000 (HTTPS + HTTP)"
+      if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+      else
+        warn "  nginx -t failed after panel api snippet — run: nginx -t"
+      fi
     fi
-  fi
+  }
 }
 
 # HTTP-only site: ACME paths must not hit SPA try_files or an apex-only HTTPS redirect.
