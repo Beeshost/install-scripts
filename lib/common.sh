@@ -1277,7 +1277,9 @@ beeshost_full_update() {
   for repo_dir in /opt/beeshost/*; do
     [ -d "$repo_dir/.git" ] || continue
     name=$(basename "$repo_dir")
-    case "$name" in scripts|Scripts) continue ;;
+    case "$name" in
+      scripts|Scripts) continue ;;
+    esac
     slug=$(beeshost_github_repo_slug "$name")
     info "  git pull: $name"
     beeshost_git_sync_repo "$repo_dir" "$slug" || warn "  pull failed for $name"
