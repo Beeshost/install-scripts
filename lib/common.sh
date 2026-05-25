@@ -1103,10 +1103,42 @@ beeshost_prisma_db_push() {
   local rc=$?
   if [ "$rc" -eq 0 ]; then
     ok "  prisma db push completed"
+    beeshost_prisma_generate || true
   else
     fail "  prisma db push failed (exit $rc) — services may still report P2021"
   fi
   return "$rc"
+}
+
+# Regenerate @prisma/client after schema changes (db push uses --skip-generate so views stay up).
+beeshost_prisma_generate() {
+  local pg=/opt/beeshost/postgres
+  if [ ! -d "$pg" ]; then
+    warn "beeshost_prisma_generate: $pg missing"
+    return 1
+  fi
+  local prisma_bin="$pg/node_modules/.bin/prisma"
+  if [ ! -x "$prisma_bin" ]; then
+    warn "beeshost_prisma_generate: $prisma_bin not executable — run npm install in $pg"
+    return 1
+  fi
+  info "Running prisma generate (refreshes TypeScript client types)"
+  (
+    cd "$pg" || exit 1
+    "$prisma_bin" generate 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) && ok "  prisma generate completed" || fail "  prisma generate failed"
+}
+
+# Orchestrator tsc and sibling imports use Postgres/Orchestrator (capital) paths.
+beeshost_ensure_repo_symlinks() {
+  local base=/opt/beeshost
+  if [ -d "$base/postgres" ]; then
+    ln -sfn "$base/postgres" "$base/Postgres"
+  fi
+  if [ -d "$base/orchestrator" ]; then
+    ln -sfn "$base/orchestrator" "$base/Orchestrator"
+  fi
 }
 
 # All BeesHost-managed systemd units that may exist on this machine.
@@ -1279,6 +1311,7 @@ beeshost_full_update() {
     name=$(basename "$repo_dir")
     case "$name" in
       scripts|Scripts) continue ;;
+      Orchestrator|Postgres) continue ;;  # canonical clones are lowercase; symlinks fixed below
     esac
     slug=$(beeshost_github_repo_slug "$name")
     info "  git pull: $name"
@@ -1291,9 +1324,10 @@ beeshost_full_update() {
 
   echo "" | tee -a "$LOG_FILE"
   info "Syncing Prisma client + schema"
-  beeshost_sync_prisma_clients || true
+  beeshost_ensure_repo_symlinks
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
+  beeshost_pdns_create_compat_views || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
   beeshost_ensure_orchestrator_dns_deps || true
