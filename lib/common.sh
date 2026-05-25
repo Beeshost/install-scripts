@@ -14,6 +14,26 @@ export DEBIAN_FRONTEND=noninteractive
 # Avoid needrestart interrupting apt upgrade/install on Debian/Ubuntu
 export NEEDRESTART_MODE=a
 
+LOG_FILE="${LOG_FILE:-/var/log/beeshost-install.log}"
+
+# Load /etc/beeshost/*.env when helpers are invoked outside beeshost-update/setup wrappers.
+beeshost_source_env() {
+  if [ -n "${DATABASE_URL:-}" ]; then
+    return 0
+  fi
+  local f
+  for f in /etc/beeshost/mononode.env /etc/beeshost/server-a.env /etc/beeshost/node.env; do
+    if [ -f "$f" ]; then
+      set -a
+      # shellcheck source=/dev/null
+      source "$f" 2>/dev/null || true
+      set +a
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Status printing
 ok() {
   echo -e "[${GREEN}  OK  ${NC}] $1" | tee -a "$LOG_FILE"
@@ -811,6 +831,7 @@ EOSQL
 # Runtime symptom this fixes:
 #   PDNSException ... ERROR: relation "domains" does not exist
 beeshost_reapply_pdns_schema() {
+  beeshost_source_env || true
   local sql=/opt/beeshost/dns/setup/db-setup.sql
   if [ ! -f "$sql" ]; then
     warn "beeshost_reapply_pdns_schema: $sql missing — dns repo not cloned yet"
