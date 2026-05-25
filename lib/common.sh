@@ -1172,22 +1172,57 @@ beeshost_ensure_mononode_node() {
   [ -d /opt/beeshost/proxmox-daemon ] || return 0
   local api_key="${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}"
   local port="${DAEMON_PORT:-3001}"
-  [ -n "$api_key" ] || { warn "beeshost_ensure_mononode_node: ORCHESTRATOR_API_KEY not set"; return 0; }
-  [ -n "${DAEMON_API_KEY:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_API_KEY not set"; return 0; }
-  [ -n "${DAEMON_HMAC_SECRET:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_HMAC_SECRET not set"; return 0; }
+  [ -n "$api_key" ] || { warn "beeshost_ensure_mononode_node: ORCHESTRATOR_API_KEY not set"; return 1; }
+  [ -n "${DAEMON_API_KEY:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_API_KEY not set"; return 1; }
+  [ -n "${DAEMON_HMAC_SECRET:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_HMAC_SECRET not set"; return 1; }
 
   info "Ensuring mononode is registered with orchestrator"
-  local resp
-  resp=$(curl -sf -X POST "http://127.0.0.1:3000/nodes/register" \
+
+  if ! systemctl is-active --quiet beeshost-orchestrator 2>/dev/null; then
+    warn "  beeshost-orchestrator is not active — starting it"
+    systemctl start beeshost-orchestrator 2>/dev/null || true
+  fi
+  if ! systemctl is-active --quiet beeshost-proxmox-daemon 2>/dev/null; then
+    warn "  beeshost-proxmox-daemon is not active — starting it"
+    systemctl start beeshost-proxmox-daemon 2>/dev/null || true
+  fi
+
+  if ! wait_for_endpoint "http://127.0.0.1:3000/health" 20; then
+    warn "  orchestrator not responding on http://127.0.0.1:3000/health"
+    journalctl -u beeshost-orchestrator -n 15 --no-pager 2>&1 | sed 's/^/    /' || true
+    return 1
+  fi
+
+  local payload http_code body
+  payload=$(printf '{"host":"127.0.0.1","port":%s,"region":"EU","apiKey":"%s","hmacSecret":"%s"}' \
+    "$port" "$DAEMON_API_KEY" "$DAEMON_HMAC_SECRET")
+
+  # Do not use curl -f — we need the body on HTTP 400/401/500 for diagnosis.
+  body=$(curl -s -w $'\n__HTTP_CODE__:%{http_code}' -X POST "http://127.0.0.1:3000/nodes/register" \
     -H "X-API-Key: ${api_key}" \
     -H "Content-Type: application/json" \
-    -d "{\"host\":\"127.0.0.1\",\"port\":${port},\"region\":\"EU\",\"apiKey\":\"${DAEMON_API_KEY}\",\"hmacSecret\":\"${DAEMON_HMAC_SECRET}\"}" 2>/dev/null || true)
-  if echo "$resp" | grep -q '"id"'; then
+    -d "$payload" 2>/dev/null || true)
+  http_code="${body##*$'\n'__HTTP_CODE__:}"
+  body="${body%$'\n'__HTTP_CODE__:*}"
+
+  if [ "$http_code" = "200" ] && echo "$body" | grep -q '"id"'; then
     ok "  mononode registered (127.0.0.1:${port})"
     return 0
   fi
-  warn "  mononode registration failed — is beeshost-orchestrator running on :3000?"
-  [ -n "$resp" ] && warn "  response: $resp"
+
+  warn "  mononode registration failed (HTTP ${http_code:-unknown})"
+  if [ -n "$body" ]; then
+    warn "  response: $body"
+  else
+    warn "  empty response — orchestrator may have crashed mid-request"
+  fi
+  case "$http_code" in
+    401) warn "  ORCHESTRATOR_API_KEY mismatch — sync: grep ORCHESTRATOR_API_KEY /etc/beeshost/mononode.env /opt/beeshost/orchestrator/.env" ;;
+    400) warn "  daemon heartbeat failed — run: journalctl -u beeshost-proxmox-daemon -n 30" ;;
+    404) warn "  /nodes/register missing — rebuild orchestrator (git pull + npm run build)" ;;
+    500) warn "  orchestrator misconfigured — journalctl -u beeshost-orchestrator -n 30" ;;
+    "")  warn "  connection failed — is beeshost-orchestrator listening on :3000?" ;;
+  esac
   return 1
 }
 
