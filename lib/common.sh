@@ -1104,6 +1104,10 @@ beeshost_prisma_db_push() {
   if [ "$rc" -eq 0 ]; then
     ok "  prisma db push completed"
     beeshost_prisma_generate || true
+    # db push --accept-data-loss drops pdns_* tables (not in schema.prisma); restore gpgsql + views.
+    if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+      beeshost_reapply_pdns_schema || true
+    fi
   else
     fail "  prisma db push failed (exit $rc) — services may still report P2021"
   fi
@@ -1327,7 +1331,6 @@ beeshost_full_update() {
   beeshost_ensure_repo_symlinks
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
-  beeshost_pdns_create_compat_views || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
   beeshost_ensure_orchestrator_dns_deps || true
@@ -1352,7 +1355,16 @@ beeshost_full_update() {
 
   if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
     if systemctl is-enabled --quiet pdns 2>/dev/null; then
-      systemctl restart pdns 2>/dev/null || true
+      if command -v pdns_server >/dev/null 2>&1; then
+        beeshost_prepare_port53_for_powerdns || true
+      fi
+      systemctl reset-failed pdns 2>/dev/null || true
+      if systemctl restart pdns 2>/dev/null; then
+        ok "  restart pdns"
+      else
+        fail "  restart pdns"
+        journalctl -u pdns -n 15 --no-pager 2>&1 | sed 's/^/      /' | tee -a "$LOG_FILE"
+      fi
     fi
   fi
 
