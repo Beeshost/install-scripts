@@ -297,10 +297,10 @@ fi
 # Register with Server A
 section "Register node with Server A"
 if confirm "Register this node with Server A now?"; then
-  prompt ADMIN_TOKEN_INPUT "Enter Server A admin token" "" secret
+  prompt ORCHESTRATOR_API_KEY_INPUT "Enter Server A orchestrator API key (ORCHESTRATOR_API_KEY)" "" secret
   
-  RESPONSE=$(curl -s -X POST "https://${SERVER_A_IP}/admin/nodes" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN_INPUT}" \
+  RESPONSE=$(curl -s -X POST "https://${SERVER_A_IP}/nodes/register" \
+    -H "X-API-Key: ${ORCHESTRATOR_API_KEY_INPUT}" \
     -H "Content-Type: application/json" \
     -d "{
       \"host\": \"${THIS_IP}\",

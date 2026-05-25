@@ -536,8 +536,8 @@ if ! step_done "node-self-registered"; then
   if wait_for_endpoint "http://localhost:3000/health" 30; then
     sleep 2  # Extra buffer
 
-    RESPONSE=$(curl -s -X POST "http://localhost:3000/admin/nodes" \
-      -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    RESPONSE=$(curl -s -X POST "http://localhost:3000/nodes/register" \
+      -H "X-API-Key: ${ORCHESTRATOR_API_KEY}" \
       -H "Content-Type: application/json" \
       -d "{
         \"host\": \"127.0.0.1\",

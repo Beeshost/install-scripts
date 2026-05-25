@@ -1166,6 +1166,31 @@ beeshost_ensure_repo_symlinks() {
   fi
 }
 
+# Mononode: ensure proxmox-daemon is registered in the Node table (provisioning requires this).
+beeshost_ensure_mononode_node() {
+  beeshost_source_env || return 0
+  [ -d /opt/beeshost/proxmox-daemon ] || return 0
+  local api_key="${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}"
+  local port="${DAEMON_PORT:-3001}"
+  [ -n "$api_key" ] || { warn "beeshost_ensure_mononode_node: ORCHESTRATOR_API_KEY not set"; return 0; }
+  [ -n "${DAEMON_API_KEY:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_API_KEY not set"; return 0; }
+  [ -n "${DAEMON_HMAC_SECRET:-}" ] || { warn "beeshost_ensure_mononode_node: DAEMON_HMAC_SECRET not set"; return 0; }
+
+  info "Ensuring mononode is registered with orchestrator"
+  local resp
+  resp=$(curl -sf -X POST "http://127.0.0.1:3000/nodes/register" \
+    -H "X-API-Key: ${api_key}" \
+    -H "Content-Type: application/json" \
+    -d "{\"host\":\"127.0.0.1\",\"port\":${port},\"region\":\"EU\",\"apiKey\":\"${DAEMON_API_KEY}\",\"hmacSecret\":\"${DAEMON_HMAC_SECRET}\"}" 2>/dev/null || true)
+  if echo "$resp" | grep -q '"id"'; then
+    ok "  mononode registered (127.0.0.1:${port})"
+    return 0
+  fi
+  warn "  mononode registration failed — is beeshost-orchestrator running on :3000?"
+  [ -n "$resp" ] && warn "  response: $resp"
+  return 1
+}
+
 # All BeesHost-managed systemd units that may exist on this machine.
 beeshost_all_service_units() {
   local f
@@ -1355,6 +1380,7 @@ beeshost_full_update() {
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
   beeshost_ensure_orchestrator_dns_deps || true
+  beeshost_ensure_mononode_node || true
 
   echo "" | tee -a "$LOG_FILE"
   info "Rebuilding orchestrator + BeePanel"
@@ -1544,6 +1570,7 @@ EOF
 
   echo "" | tee -a "$LOG_FILE"
   info "Orchestrator: patch duplicate /api/tickets route + rebuild"
+  beeshost_ensure_mononode_node || true
   beeshost_rebuild_orchestrator || true
 
   echo "" | tee -a "$LOG_FILE"
