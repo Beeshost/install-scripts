@@ -903,6 +903,20 @@ beeshost_reapply_pdns_schema() {
   ok "  public.domains and public.records views verified for gpgsql"
 }
 
+# prisma db push --accept-data-loss drops pdns_* (not in schema.prisma). Re-apply gpgsql whenever
+# the dns repo is present — do not gate on systemctl pdns.service (unit detection has flaked).
+beeshost_ensure_pdns_gpgsql_schema() {
+  beeshost_source_env || true
+  if [ ! -f /opt/beeshost/dns/setup/db-setup.sql ]; then
+    return 0
+  fi
+  if [ -z "${DATABASE_URL:-}" ]; then
+    warn "beeshost_ensure_pdns_gpgsql_schema: DATABASE_URL not set — skip PowerDNS schema"
+    return 1
+  fi
+  beeshost_reapply_pdns_schema
+}
+
 # Orchestrator bundles dns/checker at dist/dns/checker; runtime.js does require('dns2').
 # dns2 is only listed in dns/checker/package.json — not orchestrator's — so Node looks in
 # /opt/beeshost/orchestrator/node_modules and fails with MODULE_NOT_FOUND.
@@ -1138,10 +1152,7 @@ beeshost_prisma_db_push() {
   if [ "$rc" -eq 0 ]; then
     ok "  prisma db push completed"
     beeshost_prisma_generate || true
-    # db push --accept-data-loss drops pdns_* tables (not in schema.prisma); restore gpgsql + views.
-    if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
-      beeshost_reapply_pdns_schema || true
-    fi
+    beeshost_ensure_pdns_gpgsql_schema || true
   else
     fail "  prisma db push failed (exit $rc) — services may still report P2021"
   fi
@@ -1449,8 +1460,7 @@ beeshost_full_update() {
   beeshost_ensure_repo_symlinks
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
-  beeshost_pdns_migrate_48_schema || true
-  beeshost_pdns_create_compat_views || true
+  beeshost_ensure_pdns_gpgsql_schema || true
   beeshost_seed_plans || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
@@ -1640,8 +1650,7 @@ EOF
   # Drop gpgsql compat views first — they block prisma from altering pdns_* tables.
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
-  beeshost_pdns_migrate_48_schema || true
-  beeshost_pdns_create_compat_views || true
+  beeshost_ensure_pdns_gpgsql_schema || true
   beeshost_seed_plans || true
   # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
   beeshost_sync_prisma_clients || true
