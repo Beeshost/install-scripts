@@ -1,0 +1,5 @@
+scope.yaml
+reports/
+__pycache__/
+*.pyc
+.venv/

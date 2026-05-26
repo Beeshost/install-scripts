@@ -1,0 +1,29 @@
+# Copy to scope.yaml and fill in YOUR BeesHost deployment only.
+# The suite refuses to run unless authorized: true.
+
+authorized: false  # set true after you confirm written permission to test
+
+# Primary platform domain (e.g. beeshost.eu from server-a-setup)
+base_domain: "example.beeshost.eu"
+
+# Hostnames to probe (panel, webmail, API, NS, etc.)
+hosts:
+  - "panel.example.beeshost.eu"
+  - "webmail.example.beeshost.eu"
+  - "ns1.example.beeshost.eu"
+  - "ns2.example.beeshost.eu"
+
+# Optional: server IP for port/TLS checks (your Server A / mononode)
+server_ip: "203.0.113.10"
+
+# Orchestrator base URL (usually behind nginx)
+orchestrator_url: "https://panel.example.beeshost.eu"
+
+# Optional: daemon URL if you want to test node exposure (use internal IP in prod)
+daemon_url: "http://127.0.0.1:3001"
+
+# Subdomains discovered via CT will only be checked if they end with base_domain
+include_ct_subdomains: true
+
+# Rate limit between HTTP/DNS checks (seconds)
+request_delay: 0.15
