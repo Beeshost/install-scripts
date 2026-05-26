@@ -1339,18 +1339,20 @@ beeshost_diagnose() {
     warn "  FIREBASE_PROJECT_ID not set in environment"
   fi
   if systemctl is-active --quiet beeshost-orchestrator 2>/dev/null; then
-    if journalctl -u beeshost-orchestrator -n 80 --no-pager 2>/dev/null | grep -q 'Firebase Admin initialized (service account'; then
+    if journalctl -u beeshost-orchestrator -n 120 --no-pager 2>/dev/null | grep -q 'Firebase Admin initialized (service account'; then
       ok "  orchestrator journal: Firebase Admin loaded service account"
-    elif journalctl -u beeshost-orchestrator -n 80 --no-pager 2>/dev/null | grep -q 'projectId only'; then
+    elif journalctl -u beeshost-orchestrator -n 120 --no-pager 2>/dev/null | grep -q 'projectId only'; then
       fail "  orchestrator journal: Firebase Admin running WITHOUT service account (401 expected)"
+    elif [ -f "$sa" ]; then
+      ok "  orchestrator: service account on disk (Admin loads at startup after rebuild)"
     else
-      warn "  orchestrator journal: no Firebase Admin init line yet — trigger a panel login"
+      warn "  orchestrator journal: no Firebase Admin init line yet — check service account path"
     fi
   fi
 
   echo "" | tee -a "$LOG_FILE"
   info "PowerDNS:"
-  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+  if beeshost_pdns_unit_installed; then
     if systemctl is-active --quiet pdns 2>/dev/null; then
       ok "  pdns.service is active"
     else
@@ -1367,6 +1369,10 @@ beeshost_diagnose() {
   local any=0 unit script env_path exit_status exit_code last_msg
   for unit in $(beeshost_all_service_units); do
     any=1
+    local pkg="${unit#beeshost-}"
+    if beeshost_is_library_package "$pkg"; then
+      continue
+    fi
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       ok "  ${unit} active"
       continue
@@ -1487,9 +1493,14 @@ beeshost_full_update() {
 
   echo "" | tee -a "$LOG_FILE"
   info "Restarting BeesHost services"
+  beeshost_cleanup_library_systemd_units || true
   systemctl daemon-reload
-  local unit
+  local unit pkg
   for unit in $(beeshost_all_service_units); do
+    pkg="${unit#beeshost-}"
+    if beeshost_is_library_package "$pkg"; then
+      continue
+    fi
     systemctl reset-failed "$unit" 2>/dev/null || true
     if systemctl restart "$unit" 2>>"$LOG_FILE"; then
       ok "  restart $unit"
@@ -1498,7 +1509,7 @@ beeshost_full_update() {
     fi
   done
 
-  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+  if beeshost_pdns_unit_installed; then
     if systemctl is-enabled --quiet pdns 2>/dev/null; then
       if command -v pdns_server >/dev/null 2>&1; then
         beeshost_prepare_port53_for_powerdns || true
@@ -1689,7 +1700,7 @@ EOF
   # Re-write the pdns config + re-apply the gpgsql schema. Earlier versions of this installer
   # left `recursive-cache-ttl` in pdns.conf (rejected by pdns-server 4.8) and never validated
   # that db-setup.sql actually created the `domains` table.
-  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service' && [ -n "${DATABASE_URL:-}" ] && [ -n "${PDNS_API_KEY:-}" ]; then
+  if beeshost_pdns_unit_installed && [ -n "${DATABASE_URL:-}" ] && [ -n "${PDNS_API_KEY:-}" ]; then
     echo "" | tee -a "$LOG_FILE"
     info "Re-writing /etc/powerdns/pdns.conf (drops recursor-only settings)"
     beeshost_pdns_gpgsql_vars_from_database_url "$DATABASE_URL"
@@ -1704,9 +1715,14 @@ EOF
   # Restart everything.
   echo "" | tee -a "$LOG_FILE"
   info "Restarting BeesHost services"
+  beeshost_cleanup_library_systemd_units || true
   systemctl daemon-reload
-  local unit
+  local unit pkg
   for unit in $(beeshost_all_service_units); do
+    pkg="${unit#beeshost-}"
+    if beeshost_is_library_package "$pkg"; then
+      continue
+    fi
     systemctl reset-failed "$unit" 2>/dev/null || true
     if systemctl restart "$unit" 2>>"$LOG_FILE"; then
       ok "  restart $unit"
@@ -1716,7 +1732,7 @@ EOF
   done
 
   # PowerDNS gets the same treatment if it's installed.
-  if systemctl list-unit-files 2>/dev/null | grep -q '^pdns.service'; then
+  if beeshost_pdns_unit_installed; then
     if command -v pdns_server >/dev/null 2>&1; then
       info "Re-running PowerDNS port-53 prep + restart"
       beeshost_prepare_port53_for_powerdns
@@ -2064,6 +2080,52 @@ beeshost_repair_unquoted_cron_env_lines() {
   return 0
 }
 
+# Repos compiled into the orchestrator — no standalone systemd daemon (avoids Restart=always spin).
+beeshost_library_packages() {
+  printf '%s\n' \
+    deployment-health \
+    env-manager \
+    log-viewer \
+    tickets \
+    nodejs-version-alerts \
+    upgrade-suggestions \
+    vuln-scanner
+}
+
+beeshost_is_library_package() {
+  case "$1" in
+    deployment-health|env-manager|log-viewer|tickets|nodejs-version-alerts|upgrade-suggestions|vuln-scanner)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+beeshost_cleanup_library_systemd_units() {
+  local lib unit removed=0
+  for lib in $(beeshost_library_packages); do
+    unit="beeshost-${lib}"
+    [ -f "/etc/systemd/system/${unit}.service" ] || continue
+    systemctl stop "$unit" 2>/dev/null || true
+    systemctl disable "$unit" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${unit}.service"
+    ok "  removed library-only unit ${unit} (bundled in orchestrator)"
+    removed=1
+  done
+  if [ "$removed" -eq 1 ]; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
+beeshost_pdns_unit_installed() {
+  if systemctl list-unit-files 'pdns.service' 2>/dev/null | grep -qE '^pdns\.service'; then
+    return 0
+  fi
+  [ -f /lib/systemd/system/pdns.service ] && return 0
+  [ -f /etc/systemd/system/pdns.service ] && return 0
+  command -v pdns_server >/dev/null 2>&1
+}
+
 # Relative path (from repo dir) to the built service entrypoint for systemd.
 beeshost_node_service_script() {
   local dir=$1
@@ -2094,6 +2156,20 @@ write_service() {
   local dir=$2
   local description=$3
   local script=""
+
+  if beeshost_is_library_package "$name"; then
+    local unit="beeshost-${name}"
+    if [ -f "/etc/systemd/system/${unit}.service" ]; then
+      systemctl stop "$unit" 2>/dev/null || true
+      systemctl disable "$unit" 2>/dev/null || true
+      rm -f "/etc/systemd/system/${unit}.service"
+      systemctl daemon-reload 2>/dev/null || true
+      ok "  removed ${unit} (library — runs inside orchestrator)"
+    else
+      skip "beeshost-${name}: library package — no standalone systemd unit"
+    fi
+    return 0
+  fi
 
   script=$(beeshost_node_service_script "$dir") || script=""
 
