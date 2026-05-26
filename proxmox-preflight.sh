@@ -101,7 +101,8 @@ if ! "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/storage/${STORAGE}/content" 
   | grep -q "vztmpl.*${TEMPLATE_MATCH}"; then
   fail "  No vztmpl on ${STORAGE} matches \"${TEMPLATE_MATCH}\""
   info "  Run: sudo bash ${SCRIPT_DIR}/download-proxmox-template.sh"
-  info "  Or manually: pveam update && pveam available | grep debian && pveam download ${STORAGE} <name>"
+  info "  Or: pveam update && pveam available | awk '\$1==\"system\" && /debian-12/'"
+  info "      pveam download ${STORAGE} debian-12-standard_12.12-1_amd64.tar.zst  # use exact name from available"
   exit 1
 else
   ok "  At least one vztmpl matches \"${TEMPLATE_MATCH}\""

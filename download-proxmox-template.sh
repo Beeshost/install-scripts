@@ -21,7 +21,8 @@ if ! command -v pveam >/dev/null 2>&1; then
 fi
 
 STORAGE="${PROXMOX_TEMPLATE_STORAGE:-local}"
-REQUESTED="${1:-debian-12-standard}"
+# Short name used by BeesHost (template=node → PROXMOX_OSTEMPLATE substring match in vztmpl volid)
+MATCH_PREFIX="${1:-debian-12-standard}"
 ENV_FILE=/opt/beeshost/proxmox-daemon/.env
 
 info "Refreshing template catalog (pveam update)…"
@@ -30,19 +31,15 @@ if ! pveam update 2>&1 | sed 's/^/    /'; then
   tail -20 /var/log/pveam.log 2>/dev/null | sed 's/^/    /' || true
 fi
 
-TEMPLATE="$REQUESTED"
-if ! pveam available 2>/dev/null | grep -qF "$REQUESTED"; then
-  info "Template \"$REQUESTED\" not in catalog. Debian options:"
-  pveam available 2>/dev/null | grep -i debian | sed 's/^/    /' || true
-  ALT=$(pveam available 2>/dev/null | grep -i 'debian-12-standard' | awk '{print $2}' | head -1)
-  if [ -n "$ALT" ]; then
-    TEMPLATE="$ALT"
-    info "Using: $TEMPLATE"
-  else
-    fail "No debian-12-standard in pveam available — run: pveam available"
-    exit 1
-  fi
+# pveam download needs the full catalog filename (e.g. debian-12-standard_12.12-1_amd64.tar.zst), not the short label.
+TEMPLATE=$(pveam available 2>/dev/null | awk -v p="$MATCH_PREFIX" '$1=="system" && index($2, p)==1 { print $2; exit }')
+if [ -z "$TEMPLATE" ]; then
+  info "No system template starting with \"$MATCH_PREFIX\". Debian system templates:"
+  pveam available 2>/dev/null | awk '$1=="system" && /debian/ { print "    "$2 }' || true
+  fail "Pick one and run: pveam download ${STORAGE} <full-template-name>"
+  exit 1
 fi
+info "Catalog template: $TEMPLATE (PROXMOX_OSTEMPLATE will use match prefix: $MATCH_PREFIX)"
 
 info "Downloading $TEMPLATE to storage $STORAGE (may take a few minutes)…"
 pveam download "$STORAGE" "$TEMPLATE"
@@ -52,15 +49,15 @@ ok "Template on $STORAGE"
 
 if [ -f "$ENV_FILE" ]; then
   if grep -q '^PROXMOX_OSTEMPLATE=' "$ENV_FILE"; then
-    sed -i "s/^PROXMOX_OSTEMPLATE=.*/PROXMOX_OSTEMPLATE=${TEMPLATE}/" "$ENV_FILE"
+    sed -i "s/^PROXMOX_OSTEMPLATE=.*/PROXMOX_OSTEMPLATE=${MATCH_PREFIX}/" "$ENV_FILE"
   else
-    echo "PROXMOX_OSTEMPLATE=${TEMPLATE}" >> "$ENV_FILE"
+    echo "PROXMOX_OSTEMPLATE=${MATCH_PREFIX}" >> "$ENV_FILE"
   fi
   NODE_NAME="${PROXMOX_NODE:-$(hostname -s)}"
   if ! grep -q '^PROXMOX_NODE=' "$ENV_FILE"; then
     echo "PROXMOX_NODE=${NODE_NAME}" >> "$ENV_FILE"
   fi
-  ok "Updated $ENV_FILE (PROXMOX_OSTEMPLATE=${TEMPLATE})"
+  ok "Updated $ENV_FILE (PROXMOX_OSTEMPLATE=${MATCH_PREFIX})"
   systemctl restart beeshost-proxmox-daemon 2>/dev/null || true
 fi
 
