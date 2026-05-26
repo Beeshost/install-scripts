@@ -53,12 +53,15 @@ if [ -f "$ENV_FILE" ]; then
   else
     echo "PROXMOX_OSTEMPLATE=${MATCH_PREFIX}" >> "$ENV_FILE"
   fi
-  NODE_NAME="${PROXMOX_NODE:-$(hostname -s)}"
-  if ! grep -q '^PROXMOX_NODE=' "$ENV_FILE"; then
+  NODE_NAME="$(hostname -s)"
+  if grep -q '^PROXMOX_NODE=' "$ENV_FILE"; then
+    sed -i "s/^PROXMOX_NODE=.*/PROXMOX_NODE=${NODE_NAME}/" "$ENV_FILE"
+  else
     echo "PROXMOX_NODE=${NODE_NAME}" >> "$ENV_FILE"
   fi
   ok "Updated $ENV_FILE (PROXMOX_OSTEMPLATE=${MATCH_PREFIX})"
   systemctl restart beeshost-proxmox-daemon 2>/dev/null || true
+  ok "Restarted beeshost-proxmox-daemon"
 fi
 
 ok "Done — retry Create container in the panel"
