@@ -2,14 +2,14 @@
 # Prompt for optional API keys / integration secrets missing from /etc/beeshost/*.env
 # Used by beeshost-update and --repair. Requires common.sh (prompt, persist_wizard_kv, …).
 
-# key|human label|secret(yes/no)|default value|scopes (central = mononode.env; website = only if /opt/beeshost/beeshost exists)
-# Billing uses Stripe (orchestrator) — not Paddle. Marketing site repo is not part of mononode install.
+# key|human label|secret(yes/no)|default value|scopes (central = always saved to mononode.env; website = extra steps only if site clone exists)
+# Billing: Stripe on orchestrator. Dynadot: registrar API for beeshost.eu domain search/pricing (website API, not BeePanel).
 BEESHOST_OPTIONAL_ENV_SPECS=(
   'STRIPE_SECRET_KEY|Stripe secret key (sk_...)|yes||central'
   'STRIPE_WEBHOOK_SECRET|Stripe webhook signing secret (whsec_...)|yes||central'
   'RESEND_API_KEY|Resend API key (transactional email)|yes||central'
-  'DYNADOT_API_KEY|Dynadot API key (marketing site domain pricing)|yes||website'
-  'DYNADOT_CURRENCY|Dynadot price currency (USD or EUR)|no|USD|website'
+  'DYNADOT_API_KEY|Dynadot API key (domain search + TLD pricing on public site)|yes||central'
+  'DYNADOT_CURRENCY|Dynadot price currency (USD or EUR)|no|USD|central'
 )
 
 beeshost_find_central_env_file() {
@@ -182,7 +182,7 @@ beeshost_prompt_missing_optional_env() {
 
   section "Optional integrations — missing API keys"
   info "Only prompts for values not already set in $(basename "$central")"
-  info "Billing: Stripe (orchestrator). Dynadot prompts only if marketing site is cloned under /opt/beeshost/beeshost"
+  info "Billing: Stripe (orchestrator). Dynadot: saved here for the public website API (panel does not use it)"
   info "Saved answers go to ${WIZARD_STATE_FILE} and ${central}"
 
   for spec in "${BEESHOST_OPTIONAL_ENV_SPECS[@]}"; do
