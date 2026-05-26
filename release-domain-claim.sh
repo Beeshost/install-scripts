@@ -32,7 +32,7 @@ psql "$DATABASE_URL" -c \
   2>/dev/null | sed 's/^/    /' || true
 
 psql "$DATABASE_URL" -c \
-  "SELECT id, \"clientId\", apex_domain, zone_id, status FROM account_domains WHERE apex_domain = '${DOMAIN}';" \
+  "SELECT id, \"clientId\", \"apexDomain\", \"zoneId\", status FROM account_domains WHERE \"apexDomain\" = '${DOMAIN}';" \
   2>/dev/null | sed 's/^/    /' || true
 
 if [ "$CONFIRM" != "--yes" ]; then
@@ -46,7 +46,7 @@ fi
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<EOSQL
 DELETE FROM "DnsRecord" WHERE "zoneId" IN (SELECT id FROM "DnsZone" WHERE domain = '${DOMAIN}');
 DELETE FROM "DnsZone" WHERE domain = '${DOMAIN}';
-DELETE FROM account_domains WHERE apex_domain = '${DOMAIN}';
+DELETE FROM account_domains WHERE "apexDomain" = '${DOMAIN}';
 EOSQL
 
 ok "Released ${DOMAIN} — retry domain wizard or POST /domains"
