@@ -43,21 +43,22 @@ elif [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
   ok "  Port 8006 is listening locally"
 fi
 
-if journalctl -u pveproxy -n 40 --no-pager 2>/dev/null | grep -q 'pve-ssl.key: failed to load'; then
-  fail "  pveproxy workers cannot load /etc/pve/local/pve-ssl.key (HTTPS API hangs until timeout)"
-  info "  Fix on this host:"
-  info "    systemctl status pve-cluster"
-  info "    pvecm updatecerts -f"
-  info "    systemctl restart pveproxy pvedaemon"
-  info "  If pve-cluster is inactive: systemctl start pve-cluster && sleep 3 && pvecm updatecerts -f"
+if ! systemctl is-active --quiet pve-cluster 2>/dev/null; then
+  fail "  pve-cluster is not active — run: sudo bash fix-pve-cluster.sh"
   exit 1
 fi
+ok "  pve-cluster is active"
 
-if [ -d /etc/pve/local ] && [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
-  if [ ! -r /etc/pve/local/pve-ssl.key ] 2>/dev/null; then
-    fail "  /etc/pve/local/pve-ssl.key missing or unreadable (see pve-cluster / pmxcfs)"
+if [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+  if ! mountpoint -q /etc/pve 2>/dev/null; then
+    fail "  /etc/pve is not mounted — pve-cluster / pmxcfs problem"
     exit 1
   fi
+  if [ ! -r /etc/pve/local/pve-ssl.key ] 2>/dev/null; then
+    fail "  /etc/pve/local/pve-ssl.key missing — run: pvecm updatecerts -f && systemctl restart pveproxy"
+    exit 1
+  fi
+  ok "  /etc/pve/local/pve-ssl.key present"
 fi
 
 if [ "$VERIFY" = "false" ]; then
@@ -75,7 +76,10 @@ fi
 ok "  Proxmox API reachable"
 
 if ! "${CURL[@]}" --connect-timeout 5 -m 15 "${AUTH[@]}" "$BASE/version" | grep -q '"version"'; then
-  fail "  Proxmox /version unreachable — pveproxy may be hung; try: systemctl restart pveproxy"
+  fail "  Proxmox /version unreachable — try: systemctl restart pveproxy"
+  if journalctl -u pveproxy -b -n 15 --no-pager 2>/dev/null | grep -q 'pve-ssl.key: failed to load'; then
+    info "  Recent pveproxy log still shows pve-ssl.key errors — run fix-pve-cluster.sh"
+  fi
   exit 1
 fi
 ok "  Proxmox version endpoint OK"
