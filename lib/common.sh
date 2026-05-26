@@ -1623,6 +1623,8 @@ DAEMON_PORT=${DAEMON_PORT:-3001}
 PROXMOX_HOST=${PROXMOX_HOST:-https://localhost:8006}
 PROXMOX_TOKEN=root@pam!beeshost=${PROXMOX_TOKEN:-}
 PROXMOX_VERIFY_SSL=false
+PROXMOX_API_TIMEOUT_MS=${PROXMOX_API_TIMEOUT_MS:-600000}
+PROXMOX_NODE=${PROXMOX_NODE:-}
 ORCHESTRATOR_API_KEY=${ORCHESTRATOR_API_KEY:-${ADMIN_TOKEN:-}}
 CORS_ORIGIN=https://panel.${DOMAIN}
 VITE_API_URL=/api
@@ -1648,7 +1650,7 @@ EOF
     # proxmox-daemon needs the PROXMOX_* block — preserve it if present, then re-append.
     preserve_block=""
     if [ "$name" = "proxmox-daemon" ] && [ -f "${d}.env" ]; then
-      preserve_block=$(grep -E '^(PROXMOX_HOST|PROXMOX_TOKEN|PROXMOX_VERIFY_SSL|ALLOWED_IP)=' "${d}.env" 2>/dev/null || true)
+      preserve_block=$(grep -E '^(PROXMOX_HOST|PROXMOX_TOKEN|PROXMOX_VERIFY_SSL|PROXMOX_API_TIMEOUT_MS|PROXMOX_NODE|PROXMOX_OSTEMPLATE|ALLOWED_IP)=' "${d}.env" 2>/dev/null || true)
     fi
     cp "$env_file" "${d}.env"
     chmod 600 "${d}.env"

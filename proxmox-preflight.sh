@@ -39,11 +39,17 @@ fi
 AUTH=(-H "Authorization: PVEAPIToken=${PROXMOX_TOKEN}")
 
 BASE="${PROXMOX_HOST%/}/api2/json"
-if ! "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/status" | grep -q '"data"'; then
-  fail "  Cannot reach Proxmox API at $BASE (check PROXMOX_HOST, token, PROXMOX_NODE)"
+if ! "${CURL[@]}" --connect-timeout 5 -m 15 "${AUTH[@]}" "$BASE/nodes/${NODE}/status" | grep -q '"data"'; then
+  fail "  Cannot reach Proxmox API at $BASE (check PROXMOX_HOST, token, PROXMOX_NODE, systemctl status pveproxy)"
   exit 1
 fi
 ok "  Proxmox API reachable"
+
+if ! "${CURL[@]}" --connect-timeout 5 -m 15 "${AUTH[@]}" "$BASE/version" | grep -q '"version"'; then
+  fail "  Proxmox /version unreachable — pveproxy may be hung; try: systemctl restart pveproxy"
+  exit 1
+fi
+ok "  Proxmox version endpoint OK"
 
 info "LXC templates on ${STORAGE}:"
 "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/storage/${STORAGE}/content" \
