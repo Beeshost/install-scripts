@@ -25,6 +25,18 @@ STORAGE="${PROXMOX_TEMPLATE_STORAGE:-local}"
 MATCH_PREFIX="${1:-debian-12-standard}"
 ENV_FILE=/opt/beeshost/proxmox-daemon/.env
 
+# VPS installs often have `local` only; full PVE may use local-lvm for CT rootfs.
+ROOTFS_STORAGE="${PROXMOX_ROOTFS_STORAGE:-}"
+if [ -z "$ROOTFS_STORAGE" ] && command -v pvesm >/dev/null 2>&1; then
+  if pvesm status -storage local-lvm &>/dev/null; then
+    ROOTFS_STORAGE=local-lvm
+  else
+    ROOTFS_STORAGE=local
+  fi
+fi
+ROOTFS_STORAGE="${ROOTFS_STORAGE:-local}"
+info "LXC rootfs storage: ${ROOTFS_STORAGE}"
+
 info "Refreshing template catalog (pveam update)…"
 if ! pveam update 2>&1 | sed 's/^/    /'; then
   warn "pveam update failed — check DNS and /var/log/pveam.log"
@@ -59,7 +71,12 @@ if [ -f "$ENV_FILE" ]; then
   else
     echo "PROXMOX_NODE=${NODE_NAME}" >> "$ENV_FILE"
   fi
-  ok "Updated $ENV_FILE (PROXMOX_OSTEMPLATE=${MATCH_PREFIX})"
+  if grep -q '^PROXMOX_ROOTFS_STORAGE=' "$ENV_FILE"; then
+    sed -i "s/^PROXMOX_ROOTFS_STORAGE=.*/PROXMOX_ROOTFS_STORAGE=${ROOTFS_STORAGE}/" "$ENV_FILE"
+  else
+    echo "PROXMOX_ROOTFS_STORAGE=${ROOTFS_STORAGE}" >> "$ENV_FILE"
+  fi
+  ok "Updated $ENV_FILE (PROXMOX_OSTEMPLATE=${MATCH_PREFIX}, PROXMOX_ROOTFS_STORAGE=${ROOTFS_STORAGE})"
   systemctl restart beeshost-proxmox-daemon 2>/dev/null || true
   ok "Restarted beeshost-proxmox-daemon"
 fi

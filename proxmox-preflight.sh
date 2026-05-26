@@ -27,9 +27,10 @@ done
 
 NODE="${PROXMOX_NODE:-$(hostname -s)}"
 STORAGE="${PROXMOX_TEMPLATE_STORAGE:-local}"
+ROOTFS_STORAGE="${PROXMOX_ROOTFS_STORAGE:-local}"
 VERIFY="${PROXMOX_VERIFY_SSL:-false}"
 
-info "Node=${NODE} template_storage=${STORAGE} bridge=${PROXMOX_BRIDGE:-vmbr0}"
+info "Node=${NODE} template_storage=${STORAGE} rootfs_storage=${ROOTFS_STORAGE} bridge=${PROXMOX_BRIDGE:-vmbr0}"
 info "PROXMOX_HOST=${PROXMOX_HOST}"
 
 if ! command -v ss >/dev/null 2>&1; then
@@ -83,6 +84,17 @@ if ! "${CURL[@]}" --connect-timeout 5 -m 15 "${AUTH[@]}" "$BASE/version" | grep 
   exit 1
 fi
 ok "  Proxmox version endpoint OK"
+
+if command -v pvesm >/dev/null 2>&1; then
+  if ! pvesm status -storage "$ROOTFS_STORAGE" &>/dev/null; then
+    fail "  rootfs storage \"${ROOTFS_STORAGE}\" does not exist (set PROXMOX_ROOTFS_STORAGE in proxmox-daemon .env)"
+    info "  pvesm status:"
+    pvesm status 2>/dev/null | sed 's/^/    /' || true
+    info "  VPS / mononode hosts usually need PROXMOX_ROOTFS_STORAGE=local (not local-lvm)"
+    exit 1
+  fi
+  ok "  rootfs storage \"${ROOTFS_STORAGE}\" exists"
+fi
 
 info "LXC templates on ${STORAGE}:"
 "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/storage/${STORAGE}/content" \
