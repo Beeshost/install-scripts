@@ -90,6 +90,10 @@ FIREBASE_MEASUREMENT_ID=${FIREBASE_MEASUREMENT_ID:-}
 FIREBASE_SERVICE_ACCOUNT_KEY=/etc/beeshost/firebase-service-account.json
 STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
 STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+DYNADOT_API_KEY=${DYNADOT_API_KEY:-}
+DYNADOT_CURRENCY=${DYNADOT_CURRENCY:-USD}
+ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-https://api.${DOMAIN}}
+WEBSITE_ALLOWED_ORIGINS=${WEBSITE_ALLOWED_ORIGINS:-https://${DOMAIN},https://www.${DOMAIN},https://panel.${DOMAIN}}
 PDNS_API_KEY=${PDNS_API_KEY}
 RESEND_API_KEY=${RESEND_API_KEY}
 SEND_EMAIL_WEBHOOK_URL=${SEND_EMAIL_WEBHOOK_URL}
@@ -375,6 +379,8 @@ VITE_FIREBASE_CONFIG='{"apiKey":"${FIREBASE_API_KEY}","authDomain":"${FIREBASE_A
 EOF
 chmod 600 /opt/beeshost/webmail/.env
 ok "Configured webmail"
+
+beeshost_prompt_missing_optional_env || true
 
 # Daemon-specific additions (idempotent on re-runs).
 # mononode.env now already carries PROXMOX_HOST/PROXMOX_TOKEN/PROXMOX_VERIFY_SSL (orchestrator

@@ -622,7 +622,8 @@ BeesHost setup — optional arguments
                         Use this after editing the installer to pick up the fix on an existing
                         machine without re-running the entire wizard.
   --update              Git pull all /opt/beeshost repos + install-scripts, apply nginx manifest,
-                        rebuild orchestrator + BeePanel, restart services (same as beeshost-update.sh).
+                        prompt for any missing API keys (Dynadot, Stripe, …), rebuild services.
+                        Same as beeshost-update.sh.
   --help                This help
 
 Typo in a prompt? Use --undo-last or --undo-step, then re-run the installer.
@@ -1397,6 +1398,8 @@ beeshost_full_update() {
     fi
   done
 
+  beeshost_prompt_missing_optional_env || true
+
   echo "" | tee -a "$LOG_FILE"
   info "Pulling install-scripts"
   if [ -d "$scripts_root/.git" ]; then
@@ -1436,7 +1439,8 @@ beeshost_full_update() {
   beeshost_ensure_mononode_node || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Rebuilding orchestrator + BeePanel"
+  info "Rebuilding orchestrator + BeePanel + website API env"
+  beeshost_write_website_server_env || true
   beeshost_rebuild_orchestrator || true
   beeshost_rebuild_beepanel || true
 
@@ -1552,6 +1556,10 @@ FIREBASE_MEASUREMENT_ID=${FIREBASE_MEASUREMENT_ID:-}
 FIREBASE_SERVICE_ACCOUNT_KEY=/etc/beeshost/firebase-service-account.json
 STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
 STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+DYNADOT_API_KEY=${DYNADOT_API_KEY:-}
+DYNADOT_CURRENCY=${DYNADOT_CURRENCY:-USD}
+ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-https://api.${DOMAIN}}
+WEBSITE_ALLOWED_ORIGINS=${WEBSITE_ALLOWED_ORIGINS:-https://${DOMAIN},https://www.${DOMAIN},https://panel.${DOMAIN}}
 PDNS_API_KEY=${PDNS_API_KEY:-}
 RESEND_API_KEY=${RESEND_API_KEY:-}
 SEND_EMAIL_WEBHOOK_URL=${SEND_EMAIL_WEBHOOK_URL:-https://api.resend.com/emails}
@@ -1598,6 +1606,8 @@ EOF
     ok "  ${d}.env"
   done
   beeshost_write_beepanel_env || true
+  beeshost_prompt_missing_optional_env || true
+  beeshost_write_website_server_env || true
 
   # Fix every runtime issue we've seen in journalctl on the broken box, in dependency order.
   # Each helper is idempotent and safe to re-run.
@@ -2458,3 +2468,8 @@ print_summary() {
     echo -e "Review log: $LOG_FILE"
   fi
 }
+
+# Optional integration env prompts (Dynadot, Stripe, Paddle, …)
+_BEESHOST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env-wizard.sh
+source "${_BEESHOST_LIB_DIR}/env-wizard.sh"
