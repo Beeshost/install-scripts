@@ -1019,7 +1019,18 @@ beeshost_ensure_orchestrator_firebase_env() {
 }
 
 beeshost_rebuild_proxmox_daemon() {
+  local wrapper=/opt/beeshost/proxmox-wrapper
   local daemon=/opt/beeshost/proxmox-daemon
+  if [ -f "$wrapper/package.json" ]; then
+    info "Rebuilding proxmox-wrapper (npm run build)"
+    (
+      cd "$wrapper" || exit 1
+      export NODE_ENV=development
+      unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
+      npm run build 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+      exit "${PIPESTATUS[0]}"
+    ) && ok "  proxmox-wrapper rebuild complete" || fail "  proxmox-wrapper rebuild failed"
+  fi
   [ -d "$daemon" ] || return 0
   if [ ! -f "$daemon/package.json" ]; then
     return 0
