@@ -30,6 +30,18 @@ STORAGE="${PROXMOX_TEMPLATE_STORAGE:-local}"
 VERIFY="${PROXMOX_VERIFY_SSL:-false}"
 
 info "Node=${NODE} template_storage=${STORAGE} bridge=${PROXMOX_BRIDGE:-vmbr0}"
+info "PROXMOX_HOST=${PROXMOX_HOST}"
+
+if ! command -v ss >/dev/null 2>&1; then
+  warn "  ss not found — skipping local port 8006 check"
+elif [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+  if ! ss -lntp 2>/dev/null | grep -qE ':8006\b'; then
+    fail "  Nothing is listening on TCP 8006 on this host."
+    fail "  Install Proxmox VE on this server, or set PROXMOX_HOST=https://<your-pve-ip>:8006 in proxmox-daemon .env"
+    exit 1
+  fi
+  ok "  Port 8006 is listening locally"
+fi
 
 if [ "$VERIFY" = "false" ]; then
   CURL=(curl -sk)
