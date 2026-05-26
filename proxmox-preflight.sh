@@ -56,4 +56,14 @@ if command -v pveam >/dev/null 2>&1; then
   pveam list local 2>/dev/null | sed 's/^/    /' || true
 fi
 
-ok "Preflight done — provisioning needs a vztmpl whose name contains \"node\" (or change template in panel)"
+TEMPLATE_MATCH="${PROXMOX_OSTEMPLATE:-node}"
+info "Matching template substring: \"${TEMPLATE_MATCH}\" (set PROXMOX_OSTEMPLATE in proxmox-daemon .env if panel uses template=node)"
+if ! "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/storage/${STORAGE}/content" \
+  | grep -q "vztmpl.*${TEMPLATE_MATCH}"; then
+  fail "  No vztmpl on ${STORAGE} contains \"${TEMPLATE_MATCH}\" — download one, e.g.: pveam download local debian-12-standard"
+  fail "  Then add PROXMOX_OSTEMPLATE=debian-12-standard to /opt/beeshost/proxmox-daemon/.env and restart beeshost-proxmox-daemon"
+else
+  ok "  At least one vztmpl matches \"${TEMPLATE_MATCH}\""
+fi
+
+ok "Preflight done"
