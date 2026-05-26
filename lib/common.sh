@@ -1433,6 +1433,8 @@ beeshost_full_update() {
   beeshost_ensure_repo_symlinks
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
+  beeshost_pdns_migrate_48_schema || true
+  beeshost_pdns_create_compat_views || true
   beeshost_seed_plans || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
@@ -1621,6 +1623,8 @@ EOF
   # Drop gpgsql compat views first — they block prisma from altering pdns_* tables.
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
+  beeshost_pdns_migrate_48_schema || true
+  beeshost_pdns_create_compat_views || true
   beeshost_seed_plans || true
   # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
   beeshost_sync_prisma_clients || true
