@@ -95,12 +95,14 @@ if command -v pveam >/dev/null 2>&1; then
   pveam list local 2>/dev/null | sed 's/^/    /' || true
 fi
 
-TEMPLATE_MATCH="${PROXMOX_OSTEMPLATE:-node}"
-info "Matching template substring: \"${TEMPLATE_MATCH}\" (set PROXMOX_OSTEMPLATE in proxmox-daemon .env if panel uses template=node)"
+TEMPLATE_MATCH="${PROXMOX_OSTEMPLATE:-debian-12-standard}"
+info "Matching template substring: \"${TEMPLATE_MATCH}\" (panel uses template=node → PROXMOX_OSTEMPLATE in proxmox-daemon .env)"
 if ! "${CURL[@]}" "${AUTH[@]}" "$BASE/nodes/${NODE}/storage/${STORAGE}/content" \
   | grep -q "vztmpl.*${TEMPLATE_MATCH}"; then
-  fail "  No vztmpl on ${STORAGE} contains \"${TEMPLATE_MATCH}\" — download one, e.g.: pveam download local debian-12-standard"
-  fail "  Then add PROXMOX_OSTEMPLATE=debian-12-standard to /opt/beeshost/proxmox-daemon/.env and restart beeshost-proxmox-daemon"
+  fail "  No vztmpl on ${STORAGE} matches \"${TEMPLATE_MATCH}\""
+  info "  Run: sudo bash ${SCRIPT_DIR}/download-proxmox-template.sh"
+  info "  Or manually: pveam update && pveam available | grep debian && pveam download ${STORAGE} <name>"
+  exit 1
 else
   ok "  At least one vztmpl matches \"${TEMPLATE_MATCH}\""
 fi
