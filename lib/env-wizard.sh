@@ -2,15 +2,14 @@
 # Prompt for optional API keys / integration secrets missing from /etc/beeshost/*.env
 # Used by beeshost-update and --repair. Requires common.sh (prompt, persist_wizard_kv, …).
 
-# key|human label|secret(yes/no)|default value|scopes (comma: central,website)
+# key|human label|secret(yes/no)|default value|scopes (central = mononode.env; website = only if /opt/beeshost/beeshost exists)
+# Billing uses Stripe (orchestrator) — not Paddle. Marketing site repo is not part of mononode install.
 BEESHOST_OPTIONAL_ENV_SPECS=(
-  'DYNADOT_API_KEY|Dynadot API key (domain pricing + search)|yes||central,website'
-  'DYNADOT_CURRENCY|Dynadot price currency (USD or EUR)|no|USD|central,website'
-  'STRIPE_SECRET_KEY|Stripe secret key (billing)|yes||central'
-  'STRIPE_WEBHOOK_SECRET|Stripe webhook signing secret|yes||central'
+  'STRIPE_SECRET_KEY|Stripe secret key (sk_...)|yes||central'
+  'STRIPE_WEBHOOK_SECRET|Stripe webhook signing secret (whsec_...)|yes||central'
   'RESEND_API_KEY|Resend API key (transactional email)|yes||central'
-  'PADDLE_API_KEY|Paddle API key (website checkout)|yes||website'
-  'PADDLE_PRODUCT_ID|Paddle product / price ID|no||website'
+  'DYNADOT_API_KEY|Dynadot API key (marketing site domain pricing)|yes||website'
+  'DYNADOT_CURRENCY|Dynadot price currency (USD or EUR)|no|USD|website'
 )
 
 beeshost_find_central_env_file() {
@@ -67,6 +66,20 @@ beeshost_website_repo_dir() {
   return 1
 }
 
+# True when this spec should be prompted (website-scoped keys are skipped without a site clone).
+beeshost_env_spec_applies() {
+  local scopes=$1
+  case ",${scopes}," in
+    *,website,*)
+      beeshost_website_repo_dir >/dev/null
+      return $?
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 beeshost_default_orchestrator_url() {
   if [ -n "${DOMAIN:-}" ]; then
     printf 'https://api.%s' "$DOMAIN"
@@ -105,9 +118,6 @@ DYNADOT_CURRENCY=${DYNADOT_CURRENCY}
 DYNADOT_CACHE_MAX_AGE_MS=${DYNADOT_CACHE_MAX_AGE_MS:-86400000}
 STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
 STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
-PADDLE_API_KEY=${PADDLE_API_KEY:-}
-PADDLE_PRODUCT_ID=${PADDLE_PRODUCT_ID:-}
-PADDLE_TAX_CATEGORY=${PADDLE_TAX_CATEGORY:-website-hosting}
 EOF
 
   fb_json="${FIREBASE_SERVICE_ACCOUNT_JSON:-}"
@@ -172,24 +182,28 @@ beeshost_prompt_missing_optional_env() {
 
   section "Optional integrations — missing API keys"
   info "Only prompts for values not already set in $(basename "$central")"
+  info "Billing: Stripe (orchestrator). Dynadot prompts only if marketing site is cloned under /opt/beeshost/beeshost"
   info "Saved answers go to ${WIZARD_STATE_FILE} and ${central}"
 
   for spec in "${BEESHOST_OPTIONAL_ENV_SPECS[@]}"; do
     IFS='|' read -r key label secret default scopes <<<"$spec"
+    if ! beeshost_env_spec_applies "$scopes"; then
+      continue
+    fi
     prompt_env_if_missing "$key" "$label" "$default" "$secret"
   done
 
-  # Derived website-only keys (not duplicated in central env unless set)
-  if [ -z "${ORCHESTRATOR_URL:-}" ] || beeshost_env_value_missing "${ORCHESTRATOR_URL:-}"; then
-    ORCHESTRATOR_URL=$(beeshost_default_orchestrator_url)
-    beeshost_upsert_env_kv "$central" ORCHESTRATOR_URL "$ORCHESTRATOR_URL"
+  if beeshost_website_repo_dir >/dev/null; then
+    if [ -z "${ORCHESTRATOR_URL:-}" ] || beeshost_env_value_missing "${ORCHESTRATOR_URL:-}"; then
+      ORCHESTRATOR_URL=$(beeshost_default_orchestrator_url)
+      beeshost_upsert_env_kv "$central" ORCHESTRATOR_URL "$ORCHESTRATOR_URL"
+    fi
+    if [ -z "${WEBSITE_ALLOWED_ORIGINS:-}" ] || beeshost_env_value_missing "${WEBSITE_ALLOWED_ORIGINS:-}"; then
+      WEBSITE_ALLOWED_ORIGINS=$(beeshost_default_website_origins)
+      beeshost_upsert_env_kv "$central" WEBSITE_ALLOWED_ORIGINS "$WEBSITE_ALLOWED_ORIGINS"
+    fi
+    beeshost_write_website_server_env || true
   fi
-  if [ -z "${WEBSITE_ALLOWED_ORIGINS:-}" ] || beeshost_env_value_missing "${WEBSITE_ALLOWED_ORIGINS:-}"; then
-    WEBSITE_ALLOWED_ORIGINS=$(beeshost_default_website_origins)
-    beeshost_upsert_env_kv "$central" WEBSITE_ALLOWED_ORIGINS "$WEBSITE_ALLOWED_ORIGINS"
-  fi
-
-  beeshost_write_website_server_env || true
 
   # Refresh orchestrator .env copy if present
   if [ -d /opt/beeshost/orchestrator ] && [ -f "$central" ]; then

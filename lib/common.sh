@@ -623,7 +623,7 @@ BeesHost setup — optional arguments
                         Use this after editing the installer to pick up the fix on an existing
                         machine without re-running the entire wizard.
   --update              Git pull all /opt/beeshost repos + install-scripts, apply nginx manifest,
-                        prompt for any missing API keys (Dynadot, Stripe, …), rebuild services.
+                        prompt for any missing API keys (Stripe, Dynadot if website cloned), rebuild services.
                         Same as beeshost-update.sh.
   --help                This help
 
@@ -2470,7 +2470,7 @@ print_summary() {
   fi
 }
 
-# Optional integration env prompts (Dynadot, Stripe, Paddle, …)
+# Optional integration env prompts (Stripe, Dynadot when website present, …)
 _BEESHOST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env-wizard.sh
 source "${_BEESHOST_LIB_DIR}/env-wizard.sh"
