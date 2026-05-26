@@ -35,7 +35,7 @@ if [ -n "${DATABASE_URL:-}" ]; then
   info "Checking gpgsql tables and compat views:"
   out=$(psql "$DATABASE_URL" -tAc \
     "SELECT table_name || ' (' || table_type || ')' FROM information_schema.tables \
-     WHERE table_schema = 'public' AND table_name IN ('pdns_domains','pdns_records','domains','records') \
+     WHERE table_schema = 'public' AND table_name IN ('pdns_domains','pdns_records','pdns_domainmetadata','domains','records','domainmetadata') \
      ORDER BY table_name;" 2>&1) || {
     fail "  psql failed — is Postgres reachable?"
     exit 1
@@ -49,7 +49,15 @@ if [ -n "${DATABASE_URL:-}" ]; then
     fail "  public.domains view missing — run: sudo bash ${SCRIPT_DIR}/fix-pdns.sh"
     exit 1
   fi
-  ok "  gpgsql tables + domains view present"
+  if ! printf '%s\n' "$out" | grep -q 'pdns_domainmetadata'; then
+    fail "  public.pdns_domainmetadata missing — run: sudo bash ${SCRIPT_DIR}/fix-pdns.sh (pull dns repo first)"
+    exit 1
+  fi
+  if ! printf '%s\n' "$out" | grep -q 'domainmetadata.*VIEW'; then
+    fail "  public.domainmetadata view missing — run: sudo bash ${SCRIPT_DIR}/fix-pdns.sh"
+    exit 1
+  fi
+  ok "  gpgsql tables + compat views present"
 else
   warn "  DATABASE_URL not set — skipping schema check"
 fi

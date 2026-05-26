@@ -780,6 +780,10 @@ beeshost_pdns_drop_compat_views() {
 DROP VIEW IF EXISTS domains;
 DROP VIEW IF EXISTS records;
 DROP VIEW IF EXISTS supermasters;
+DROP VIEW IF EXISTS domainmetadata;
+DROP VIEW IF EXISTS comments;
+DROP VIEW IF EXISTS cryptokeys;
+DROP VIEW IF EXISTS tsigkeys;
 EOSQL
 }
 
@@ -814,14 +818,18 @@ beeshost_pdns_create_compat_views() {
     warn "beeshost_pdns_create_compat_views: DATABASE_URL not set"
     return 1
   fi
-  info "Creating PowerDNS compat views (domains → pdns_domains, records → pdns_records)"
+  info "Creating PowerDNS compat views (domains, records, domainmetadata, … → pdns_*)"
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'EOSQL' 2>&1 | tee -a "$LOG_FILE"
 CREATE OR REPLACE VIEW domains AS SELECT * FROM pdns_domains;
 CREATE OR REPLACE VIEW records AS SELECT * FROM pdns_records;
 CREATE OR REPLACE VIEW supermasters AS SELECT * FROM pdns_supermasters;
+CREATE OR REPLACE VIEW domainmetadata AS SELECT * FROM pdns_domainmetadata;
+CREATE OR REPLACE VIEW comments AS SELECT * FROM pdns_comments;
+CREATE OR REPLACE VIEW cryptokeys AS SELECT * FROM pdns_cryptokeys;
+CREATE OR REPLACE VIEW tsigkeys AS SELECT * FROM pdns_tsigkeys;
 EOSQL
   if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-    ok "  PowerDNS compat views (domains, records, supermasters)"
+    ok "  PowerDNS compat views (domains, records, domainmetadata, comments, cryptokeys, tsigkeys)"
     return 0
   fi
   fail "  PowerDNS compat views failed — see $LOG_FILE"
@@ -860,7 +868,7 @@ beeshost_reapply_pdns_schema() {
   out=$(psql "$DATABASE_URL" -tAc \
     "SELECT table_name FROM information_schema.tables \
      WHERE table_schema = 'public' AND table_type = 'BASE TABLE' \
-     AND table_name IN ('pdns_domains','pdns_records','pdns_supermasters') \
+     AND table_name IN ('pdns_domains','pdns_records','pdns_supermasters','pdns_domainmetadata') \
      ORDER BY table_name;" 2>&1)
   if [ -z "$out" ]; then
     fail "  No PowerDNS pdns_* tables in public schema — db-setup.sql may have failed silently"
@@ -893,7 +901,7 @@ beeshost_reapply_pdns_schema() {
   out=$(psql "$DATABASE_URL" -tAc \
     "SELECT table_name FROM information_schema.tables \
      WHERE table_schema = 'public' AND table_type = 'VIEW' \
-     AND table_name IN ('domains','records','supermasters') \
+     AND table_name IN ('domains','records','supermasters','domainmetadata') \
      ORDER BY table_name;" 2>&1)
   if [ -z "$out" ]; then
     fail "  PowerDNS compat views missing in public schema"
