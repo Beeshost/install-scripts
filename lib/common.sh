@@ -1004,6 +1004,22 @@ beeshost_ensure_orchestrator_firebase_env() {
   ok "  orchestrator .env: Firebase service account configured"
 }
 
+beeshost_rebuild_proxmox_daemon() {
+  local daemon=/opt/beeshost/proxmox-daemon
+  [ -d "$daemon" ] || return 0
+  if [ ! -f "$daemon/package.json" ]; then
+    return 0
+  fi
+  info "Rebuilding proxmox-daemon (npm run build)"
+  (
+    cd "$daemon" || exit 1
+    export NODE_ENV=development
+    unset NPM_CONFIG_PRODUCTION 2>/dev/null || true
+    npm run build 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) && ok "  proxmox-daemon rebuild complete" || fail "  proxmox-daemon rebuild failed"
+}
+
 beeshost_rebuild_orchestrator() {
   local orch=/opt/beeshost/orchestrator
   [ -d "$orch" ] || return 0
@@ -1442,8 +1458,9 @@ beeshost_full_update() {
   beeshost_ensure_mononode_node || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Rebuilding orchestrator + BeePanel + website API env"
+  info "Rebuilding orchestrator + proxmox-daemon + BeePanel + website API env"
   beeshost_write_website_server_env || true
+  beeshost_rebuild_proxmox_daemon || true
   beeshost_rebuild_orchestrator || true
   beeshost_rebuild_beepanel || true
 
@@ -1638,8 +1655,9 @@ EOF
   beeshost_ensure_orchestrator_dns_deps || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Orchestrator: patch duplicate /api/tickets route + rebuild"
+  info "Orchestrator + proxmox-daemon: rebuild"
   beeshost_ensure_mononode_node || true
+  beeshost_rebuild_proxmox_daemon || true
   beeshost_rebuild_orchestrator || true
 
   echo "" | tee -a "$LOG_FILE"
