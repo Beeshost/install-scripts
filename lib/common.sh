@@ -1236,8 +1236,8 @@ beeshost_ensure_mononode_node() {
   info "Ensuring mononode is registered with orchestrator"
 
   if ! systemctl is-active --quiet beeshost-orchestrator 2>/dev/null; then
-    warn "  beeshost-orchestrator is not active — starting it"
-    systemctl start beeshost-orchestrator 2>/dev/null || true
+    warn "  beeshost-orchestrator is not active — rebuild/restart first (update script registers mononode after restart)"
+    return 1
   fi
   if ! systemctl is-active --quiet beeshost-proxmox-daemon 2>/dev/null; then
     warn "  beeshost-proxmox-daemon is not active — starting it"
@@ -1482,7 +1482,6 @@ beeshost_full_update() {
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
   beeshost_ensure_orchestrator_dns_deps || true
-  beeshost_ensure_mononode_node || true
 
   echo "" | tee -a "$LOG_FILE"
   info "Rebuilding orchestrator + proxmox-daemon + BeePanel + website API env"
@@ -1523,6 +1522,8 @@ beeshost_full_update() {
       fi
     fi
   fi
+
+  beeshost_ensure_mononode_node || true
 
   sleep 2
   beeshost_diagnose
@@ -1689,7 +1690,6 @@ EOF
 
   echo "" | tee -a "$LOG_FILE"
   info "Orchestrator + proxmox-daemon: rebuild"
-  beeshost_ensure_mononode_node || true
   beeshost_rebuild_proxmox_daemon || true
   beeshost_rebuild_orchestrator || true
 
@@ -1748,6 +1748,8 @@ EOF
       fi
     fi
   fi
+
+  beeshost_ensure_mononode_node || true
 
   sleep 3
   beeshost_diagnose
