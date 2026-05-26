@@ -27,7 +27,10 @@ info "Hostname: $(hostname -f 2>/dev/null || hostname -s)"
 info "Primary IP for /etc/hosts:"
 ip -4 route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") { print "  ", $(i+1); exit } }' || true
 
-beeshost_fix_proxmox_hostname_resolution || true
+if ! beeshost_fix_proxmox_hostname_resolution; then
+  fail "Fix /etc/hosts first (hostname must resolve to a non-loopback IP)"
+  exit 1
+fi
 
 echo ""
 info "Recent pve-cluster journal:"

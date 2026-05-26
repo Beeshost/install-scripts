@@ -2234,10 +2234,24 @@ EOF
   fi
 }
 
+# Contabo/cloud images set manage_etc_hosts: true and rewrite /etc/hosts on boot.
+beeshost_disable_cloud_init_etc_hosts_management() {
+  [ -f /etc/cloud/cloud.cfg ] || return 0
+  if grep -qE '^manage_etc_hosts:\s*false' /etc/cloud/cloud.cfg 2>/dev/null; then
+    return 0
+  fi
+  if grep -qE '^manage_etc_hosts:' /etc/cloud/cloud.cfg 2>/dev/null; then
+    sed -i 's/^manage_etc_hosts:.*/manage_etc_hosts: false/' /etc/cloud/cloud.cfg
+  else
+    printf '\nmanage_etc_hosts: false\n' >> /etc/cloud/cloud.cfg
+  fi
+  ok "cloud-init: manage_etc_hosts set to false (keeps Proxmox /etc/hosts fix after reboot)"
+}
+
 # Proxmox pmxcfs requires the local hostname to resolve to a non-loopback IP.
 # Debian's default "127.0.1.1 hostname" breaks pve-cluster; many VPS hostnames have no public DNS.
 beeshost_fix_proxmox_hostname_resolution() {
-  local short fq ip line
+  local short fq ip line resolved
   short=$(hostname -s)
   fq=$(hostname -f 2>/dev/null || echo "$short")
   ip=$(ip -4 route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="src") { print $(i+1); exit } }')
@@ -2249,9 +2263,25 @@ beeshost_fix_proxmox_hostname_resolution() {
     return 1
   fi
 
-  if [ -f /etc/hosts ] && grep -q "127.0.1.1" /etc/hosts 2>/dev/null && grep "127.0.1.1" /etc/hosts | grep -qF "$short"; then
-    sed -i "/127\.0\.1\.1.*${short}/d" /etc/hosts
-    ok "Removed 127.0.1.1 entry for ${short} (required for Proxmox pmxcfs)"
+  beeshost_disable_cloud_init_etc_hosts_management || true
+
+  if [ -f /etc/hosts ]; then
+    # Remove 127.0.1.1 lines that map the node name to loopback (breaks pmxcfs).
+    if grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
+      if grep "127.0.1.1" /etc/hosts | grep -qF "$short"; then
+        sed -i "/127\.0\.1\.1.*${short}/d" /etc/hosts
+        ok "Removed 127.0.1.1 entry for ${short} (required for Proxmox pmxcfs)"
+      fi
+      if [ "$fq" != "$short" ] && grep "127.0.1.1" /etc/hosts | grep -qF "$fq"; then
+        sed -i "/127\.0\.1\.1.*$(echo "$fq" | sed 's/\./\\./g')/d" /etc/hosts
+        ok "Removed 127.0.1.1 entry for ${fq}"
+      fi
+    fi
+    # Drop old non-loopback lines for this host so we do not duplicate.
+    sed -i "/[[:space:]]${short}([[:space:]]|\$)/{ /^127\./!d; }" /etc/hosts 2>/dev/null || true
+    if [ "$fq" != "$short" ]; then
+      sed -i "/[[:space:]]${fq//./\\.}([[:space:]]|\$)/{ /^127\./!d; }" /etc/hosts 2>/dev/null || true
+    fi
   fi
 
   if [ "$fq" != "$short" ]; then
@@ -2259,11 +2289,18 @@ beeshost_fix_proxmox_hostname_resolution() {
   else
     line="$ip $short"
   fi
-  if grep -qF "$line" /etc/hosts 2>/dev/null; then
-    return 0
+  if ! grep -qF "$line" /etc/hosts 2>/dev/null; then
+    echo "$line" >> /etc/hosts
+    ok "Added /etc/hosts: $line (Proxmox cluster filesystem)"
   fi
-  echo "$line" >> /etc/hosts
-  ok "Added /etc/hosts: $line (Proxmox cluster filesystem)"
+
+  resolved=$(getent ahostsv4 "$short" 2>/dev/null | awk '{print $1; exit}')
+  if [ "$resolved" = "127.0.0.1" ] || [ "$resolved" = "127.0.1.1" ]; then
+    warn "Hostname ${short} still resolves to ${resolved:-unknown} — check /etc/hosts"
+    return 1
+  fi
+  ok "Hostname ${short} resolves to ${resolved:-$ip}"
+  return 0
 }
 
 # UFW base rules (shared)
