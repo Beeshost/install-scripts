@@ -1020,18 +1020,13 @@ beeshost_rebuild_orchestrator() {
   ) && ok "  orchestrator rebuild complete" || fail "  orchestrator rebuild failed"
 }
 
-# BeesHost production Firebase web app (besshost-aba1e). Used when mononode.env has no FIREBASE_API_KEY.
+# BeesHost production Firebase web app — require mononode.env; never hardcode keys in repo.
 beeshost_firebase_web_defaults() {
   if [ -n "${FIREBASE_API_KEY:-}" ] && [ "${FIREBASE_API_KEY}" != 'YOUR_API_KEY' ]; then
     return 0
   fi
-  export FIREBASE_API_KEY='AIzaSyA12LZuU2ZzWqNK6WFeQ0etVBzlOtTBh48'
-  export FIREBASE_AUTH_DOMAIN='besshost-aba1e.firebaseapp.com'
-  export FIREBASE_PROJECT_ID='besshost-aba1e'
-  export FIREBASE_STORAGE_BUCKET='besshost-aba1e.firebasestorage.app'
-  export FIREBASE_MESSAGING_SENDER_ID='213649936721'
-  export FIREBASE_APP_ID='1:213649936721:web:cf447609ffb9302790c370'
-  export FIREBASE_MEASUREMENT_ID='G-KKHGSQ2QTV'
+  warn "FIREBASE_API_KEY not set in mononode.env — set it before building BeePanel/website"
+  return 1
 }
 
 # Vite bakes env at build time — mononode.env VITE_FIREBASE_CONFIG alone is not enough for BeePanel.
@@ -1162,7 +1157,7 @@ beeshost_seed_plans() {
     warn "beeshost_seed_plans: $pg missing"
     return 1
   fi
-  info "Seeding Plan table (starter, business)"
+  info "Seeding Plan table (starter, business, pro, admin)"
   (
     cd "$pg" || exit 1
     set -a
