@@ -43,6 +43,23 @@ elif [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
   ok "  Port 8006 is listening locally"
 fi
 
+if journalctl -u pveproxy -n 40 --no-pager 2>/dev/null | grep -q 'pve-ssl.key: failed to load'; then
+  fail "  pveproxy workers cannot load /etc/pve/local/pve-ssl.key (HTTPS API hangs until timeout)"
+  info "  Fix on this host:"
+  info "    systemctl status pve-cluster"
+  info "    pvecm updatecerts -f"
+  info "    systemctl restart pveproxy pvedaemon"
+  info "  If pve-cluster is inactive: systemctl start pve-cluster && sleep 3 && pvecm updatecerts -f"
+  exit 1
+fi
+
+if [ -d /etc/pve/local ] && [[ "${PROXMOX_HOST}" =~ ^https?://(127\.0\.0\.1|localhost)(:|/|$) ]]; then
+  if [ ! -r /etc/pve/local/pve-ssl.key ] 2>/dev/null; then
+    fail "  /etc/pve/local/pve-ssl.key missing or unreadable (see pve-cluster / pmxcfs)"
+    exit 1
+  fi
+fi
+
 if [ "$VERIFY" = "false" ]; then
   CURL=(curl -sk)
 else
