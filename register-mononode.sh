@@ -19,6 +19,14 @@ systemctl restart beeshost-proxmox-daemon 2>/dev/null || true
 systemctl restart beeshost-orchestrator 2>/dev/null || true
 sleep 2
 
+port="${DAEMON_PORT:-3001}"
+if ! curl -sf --max-time 3 "http://127.0.0.1:${port}/healthz" >/dev/null; then
+  fail "Daemon not responding on http://127.0.0.1:${port}/healthz — rebuild proxmox-daemon (git pull + npm run build)"
+  warn "  journalctl -u beeshost-proxmox-daemon -n 30"
+  exit 1
+fi
+ok "  daemon /healthz OK"
+
 beeshost_ensure_mononode_node || exit 1
 
 if [ -n "${DATABASE_URL:-}" ]; then
