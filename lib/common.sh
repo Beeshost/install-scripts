@@ -1155,6 +1155,28 @@ beeshost_prisma_generate() {
   ) && ok "  prisma generate completed" || fail "  prisma generate failed"
 }
 
+# Upsert starter + business rows in Plan (required for provisioning / Stripe).
+beeshost_seed_plans() {
+  local pg=/opt/beeshost/postgres
+  if [ ! -f "$pg/package.json" ]; then
+    warn "beeshost_seed_plans: $pg missing"
+    return 1
+  fi
+  info "Seeding Plan table (starter, business)"
+  (
+    cd "$pg" || exit 1
+    set -a
+    # shellcheck source=/dev/null
+    source /etc/beeshost/mononode.env 2>/dev/null \
+      || source /etc/beeshost/server-a.env 2>/dev/null \
+      || true
+    set +a
+    export NODE_ENV=development
+    npm run seed 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  ) && ok "  plans seeded" || fail "  plan seed failed — run: cd /opt/beeshost/postgres && npm run seed"
+}
+
 # Orchestrator tsc and sibling imports use Postgres/Orchestrator (capital) paths.
 beeshost_ensure_repo_symlinks() {
   local base=/opt/beeshost
@@ -1412,6 +1434,7 @@ beeshost_full_update() {
   beeshost_ensure_repo_symlinks
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
+  beeshost_seed_plans || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
   beeshost_ensure_orchestrator_dns_deps || true
@@ -1592,6 +1615,7 @@ EOF
   # Drop gpgsql compat views first — they block prisma from altering pdns_* tables.
   beeshost_pdns_drop_compat_views
   beeshost_prisma_db_push || true
+  beeshost_seed_plans || true
   # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
   beeshost_sync_prisma_clients || true
 
