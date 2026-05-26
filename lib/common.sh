@@ -71,7 +71,8 @@ prompt() {
   local secret=$4   # if "secret" → hide input
 
   beeshost_load_wizard_state_once
-  local saved_val="${!var_name}"
+  # ${!var_name:-} — safe under `set -u` when the target variable is unset
+  local saved_val="${!var_name:-}"
   if [ -n "$saved_val" ]; then
     info "Using saved ${var_name} from ${WIZARD_STATE_FILE} — to re-enter: delete that line or run --undo-step on the relevant installer step"
     return 0

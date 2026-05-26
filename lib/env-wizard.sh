@@ -151,7 +151,7 @@ prompt_env_if_missing() {
   prompt "$var_name" "$prompt_text" "$default" "$secret"
 
   if [ -n "$central" ] && [ -n "${!var_name:-}" ]; then
-    beeshost_upsert_env_kv "$central" "$var_name" "${!var_name}"
+    beeshost_upsert_env_kv "$central" "$var_name" "${!var_name:-}"
   fi
 }
 
