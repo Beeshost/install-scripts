@@ -1,5 +1,5 @@
 #!/bin/bash
-# Recreate PowerDNS gpgsql tables + compat views after prisma db push dropped them.
+# Recreate PowerDNS gpgsql tables + compat views if they are missing (e.g. after a bad db push).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

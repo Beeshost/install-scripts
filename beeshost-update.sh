@@ -1,5 +1,6 @@
 #!/bin/bash
 # One-command BeesHost update: git pull all repos, apply nginx manifest, rebuild, restart.
+# Schema: uses `prisma migrate deploy` only (does not wipe pdns_* DNS zones or drop app data).
 # Usage: sudo bash beeshost-update.sh
 set -euo pipefail
 

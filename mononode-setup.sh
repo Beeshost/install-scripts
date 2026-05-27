@@ -263,7 +263,8 @@ if ! step_done "db-migrations"; then
   # `prisma migrate deploy` only applies tracked migration files. Models that have no
   # migration row never get a table, which surfaces at runtime as P2021. db push aligns
   # the live schema with prisma/schema.prisma to fill those gaps.
-  beeshost_prisma_db_push || warn "prisma db push skipped — install will continue, services may still hit P2021"
+  export BEESHOST_PRISMA_MODE=install
+  beeshost_prisma_db_push || warn "prisma schema sync skipped — install will continue, services may still hit P2021"
 
   if [ -f "seed.ts" ] || [ -f "seed.js" ]; then
     run_with_retry "Seed database" npm run seed

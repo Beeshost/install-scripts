@@ -911,18 +911,40 @@ beeshost_reapply_pdns_schema() {
   ok "  public.domains and public.records views verified for gpgsql"
 }
 
-# prisma db push --accept-data-loss drops pdns_* (not in schema.prisma). Re-apply gpgsql whenever
-# the dns repo is present — do not gate on systemctl pdns.service (unit detection has flaked).
-beeshost_ensure_pdns_gpgsql_schema() {
+# True when pdns_domains already exists (zones/records must not be recreated by Prisma).
+beeshost_pdns_tables_exist() {
+  if [ -z "${DATABASE_URL:-}" ]; then
+    return 1
+  fi
+  psql "$DATABASE_URL" -tAc \
+    "SELECT 1 FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_name = 'pdns_domains' LIMIT 1;" \
+    2>/dev/null | grep -q '^1$'
+}
+
+# On update: only add missing columns + compat views. Full db-setup.sql only when tables are absent.
+beeshost_pdns_ensure_schema_light() {
   beeshost_source_env || true
   if [ ! -f /opt/beeshost/dns/setup/db-setup.sql ]; then
     return 0
   fi
   if [ -z "${DATABASE_URL:-}" ]; then
-    warn "beeshost_ensure_pdns_gpgsql_schema: DATABASE_URL not set — skip PowerDNS schema"
+    warn "beeshost_pdns_ensure_schema_light: DATABASE_URL not set — skip PowerDNS schema"
     return 1
   fi
+  if beeshost_pdns_tables_exist; then
+    info "PowerDNS pdns_* tables present — preserving zone data (compat views only)"
+    beeshost_pdns_migrate_48_schema || return 1
+    beeshost_pdns_create_compat_views || return 1
+    return 0
+  fi
+  info "PowerDNS pdns_* tables missing — applying full gpgsql schema (first install)"
   beeshost_reapply_pdns_schema
+}
+
+# prisma db push --accept-data-loss drops pdns_* (not in schema.prisma). Prefer migrate deploy on updates.
+beeshost_ensure_pdns_gpgsql_schema() {
+  beeshost_pdns_ensure_schema_light
 }
 
 # Orchestrator bundles dns/checker at dist/dns/checker; runtime.js does require('dns2').
@@ -1135,12 +1157,35 @@ beeshost_rebuild_beepanel() {
   return 0
 }
 
-# Force-sync the Postgres schema to match prisma/schema.prisma. Equivalent of:
-#   cd /opt/beeshost/postgres && DATABASE_URL=... npx prisma db push --skip-generate
-# Used when migration files are missing for some models in the schema (e.g. abusemonitor
-# blowing up with: P2021 table 'public.ContainerMetricSnapshot' does not exist).
+# BEESHOST_PRISMA_MODE=install  — fresh mononode (may run db push with --accept-data-loss)
+# BEESHOST_PRISMA_MODE=update   — beeshost-update / repair (migrate deploy only; never wipe pdns_*)
+beeshost_prisma_has_migrations() {
+  local pg="$1"
+  [ -d "$pg/prisma/migrations" ] || return 1
+  find "$pg/prisma/migrations" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .
+}
+
+beeshost_prisma_run_in_pg() {
+  local pg="$1"
+  shift
+  (
+    cd "$pg" || exit 1
+    set -a
+    # shellcheck source=/dev/null
+    source /etc/beeshost/mononode.env 2>/dev/null \
+      || source /etc/beeshost/server-a.env 2>/dev/null \
+      || true
+    set +a
+    "$@" 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
+    exit "${PIPESTATUS[0]}"
+  )
+}
+
+# Align Prisma schema without dropping PowerDNS zones or unrelated tables.
 beeshost_prisma_db_push() {
   local pg=/opt/beeshost/postgres
+  local mode="${BEESHOST_PRISMA_MODE:-update}"
+
   if [ ! -d "$pg" ]; then
     warn "beeshost_prisma_db_push: $pg missing — clone the postgres repo first"
     return 1
@@ -1154,28 +1199,47 @@ beeshost_prisma_db_push() {
     warn "beeshost_prisma_db_push: $prisma_bin not executable — run 'npm install' in $pg first"
     return 1
   fi
-  info "Running prisma db push (aligns Postgres tables to schema.prisma) — irreversible if there are conflicts"
+
+  beeshost_source_env || true
   beeshost_pdns_drop_compat_views
-  (
-    cd "$pg" || exit 1
-    set -a
-    # shellcheck source=/dev/null
-    source /etc/beeshost/mononode.env 2>/dev/null \
-      || source /etc/beeshost/server-a.env 2>/dev/null \
-      || true
-    set +a
-    "$prisma_bin" db push --skip-generate --accept-data-loss 2>&1 | sed 's/^/    /' | tee -a "$LOG_FILE"
-    exit "${PIPESTATUS[0]}"
-  )
-  local rc=$?
-  if [ "$rc" -eq 0 ]; then
-    ok "  prisma db push completed"
-    beeshost_prisma_generate || true
-    beeshost_ensure_pdns_gpgsql_schema || true
+
+  local schema_rc=0
+
+  if beeshost_prisma_has_migrations "$pg"; then
+    info "Applying Prisma migrations (migrate deploy — preserves pdns_* and existing rows)"
+    beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate deploy
+    schema_rc=$?
+    if [ "$schema_rc" -eq 0 ]; then
+      ok "  prisma migrate deploy completed"
+    else
+      fail "  prisma migrate deploy failed (exit $schema_rc)"
+    fi
   else
-    fail "  prisma db push failed (exit $rc) — services may still report P2021"
+    warn "  No prisma/migrations in $pg — migrate deploy skipped"
+    schema_rc=1
   fi
-  return "$rc"
+
+  if [ "$schema_rc" -ne 0 ]; then
+    if [ "$mode" = "install" ]; then
+      warn "  Falling back to prisma db push for fresh install only"
+      info "Running prisma db push (install mode — may drop tables not in schema.prisma)"
+      beeshost_prisma_run_in_pg "$pg" "$prisma_bin" db push --skip-generate --accept-data-loss
+      schema_rc=$?
+      if [ "$schema_rc" -eq 0 ]; then
+        ok "  prisma db push completed (install)"
+      else
+        fail "  prisma db push failed (exit $schema_rc)"
+      fi
+    else
+      warn "  Skipping prisma db push on update (would risk dropping pdns_domains / pdns_records)"
+      warn "  Fix migrations manually: cd $pg && npx prisma migrate deploy"
+      schema_rc=0
+    fi
+  fi
+
+  beeshost_prisma_generate || true
+  beeshost_pdns_ensure_schema_light || true
+  return "$schema_rc"
 }
 
 # Regenerate @prisma/client after schema changes (db push uses --skip-generate so views stay up).
@@ -1481,11 +1545,10 @@ beeshost_full_update() {
   beeshost_apply_nginx_manifest "$scripts_root" || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Syncing Prisma client + schema"
+  info "Syncing Prisma client + schema (update mode — preserves PowerDNS zones)"
   beeshost_ensure_repo_symlinks
-  beeshost_pdns_drop_compat_views
+  export BEESHOST_PRISMA_MODE=update
   beeshost_prisma_db_push || true
-  beeshost_ensure_pdns_gpgsql_schema || true
   beeshost_seed_plans || true
   beeshost_sync_prisma_clients || true
   beeshost_link_sibling_modules || true
@@ -1682,11 +1745,9 @@ EOF
   beeshost_sync_prisma_clients || true
 
   echo "" | tee -a "$LOG_FILE"
-  info "Aligning Postgres schema with prisma/schema.prisma (db push)"
-  # Drop gpgsql compat views first — they block prisma from altering pdns_* tables.
-  beeshost_pdns_drop_compat_views
+  info "Aligning Postgres schema (migrate deploy — preserves PowerDNS zones)"
+  export BEESHOST_PRISMA_MODE=update
   beeshost_prisma_db_push || true
-  beeshost_ensure_pdns_gpgsql_schema || true
   beeshost_seed_plans || true
   # Re-sync clients after db push: prisma regenerates into postgres/node_modules first.
   beeshost_sync_prisma_clients || true
@@ -1721,8 +1782,8 @@ EOF
     ok "  pdns.conf regenerated"
 
     echo "" | tee -a "$LOG_FILE"
-    info "Re-applying PowerDNS gpgsql schema (creates domains/records tables if missing)"
-    beeshost_reapply_pdns_schema || true
+    info "Ensuring PowerDNS gpgsql schema (creates tables only if missing)"
+    beeshost_pdns_ensure_schema_light || true
   fi
 
   # Restart everything.
