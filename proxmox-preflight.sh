@@ -85,6 +85,16 @@ if ! "${CURL[@]}" --connect-timeout 5 -m 15 "${AUTH[@]}" "$BASE/version" | grep 
 fi
 ok "  Proxmox version endpoint OK"
 
+BRIDGE="${PROXMOX_BRIDGE:-vmbr0}"
+if ip link show "$BRIDGE" &>/dev/null; then
+  ok "  Linux bridge ${BRIDGE} exists"
+else
+  fail "  Bridge ${BRIDGE} does not exist — LXC start will fail (bridge '${BRIDGE}' does not exist)"
+  info "  Fix: sudo bash ${SCRIPT_DIR}/fix-proxmox-bridge.sh"
+  info "  Or Proxmox UI → node → Network → Create → Linux Bridge (${BRIDGE})"
+  exit 1
+fi
+
 if command -v pvesm >/dev/null 2>&1; then
   if ! pvesm status -storage "$ROOTFS_STORAGE" &>/dev/null; then
     fail "  rootfs storage \"${ROOTFS_STORAGE}\" does not exist (set PROXMOX_ROOTFS_STORAGE in proxmox-daemon .env)"

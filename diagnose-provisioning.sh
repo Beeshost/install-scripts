@@ -36,7 +36,7 @@ if [ -n "${DATABASE_URL:-}" ]; then
   echo ""
   info "Latest provisioning requests:"
   psql "$DATABASE_URL" -c \
-    'SELECT id, status, attempt, "errorCode", left("errorMessage", 80) AS err, "createdAt" FROM "ProvisioningRequest" ORDER BY "createdAt" DESC LIMIT 5;' \
+    'SELECT id, status, attempt, "errorCode", left("errorMessage", 80) AS err, "createdAt" FROM provisioning_requests ORDER BY "createdAt" DESC LIMIT 5;' \
     2>/dev/null | sed 's/^/    /' || true
 
   echo ""
@@ -61,6 +61,6 @@ info "  • Container row exists but CT destroyed → mark destroyed in DB"
 info "  • canRetry false (60s cooldown) → wait or reset request"
 echo ""
 info "Reset stuck running request (replace REQUEST_ID):"
-echo '  psql "$DATABASE_URL" -c "UPDATE \"ProvisioningRequest\" SET status='"'"'failed'"'"', \"errorMessage\"='"'"'reset by admin'"'"' WHERE id='"'"'REQUEST_ID'"'"' AND status='"'"'running'"'"';"'
+echo '  psql "$DATABASE_URL" -c "UPDATE provisioning_requests SET status='"'"'failed'"'"', \"errorMessage\"='"'"'reset by admin'"'"' WHERE id='"'"'REQUEST_ID'"'"' AND status='"'"'running'"'"';"'
 info "Mark ghost container destroyed (replace VMID):"
 echo '  psql "$DATABASE_URL" -c "UPDATE \"Container\" SET status='"'"'destroyed'"'"' WHERE vmid=VMID;"'
