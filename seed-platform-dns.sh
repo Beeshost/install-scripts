@@ -61,7 +61,6 @@ ensure_pdns_zone() {
 {
   "name": "${DOMAIN}.",
   "kind": "Native",
-  "nameservers": ["${NS1}", "${NS2}"],
   "rrsets": [
     {
       "name": "${DOMAIN}.",
