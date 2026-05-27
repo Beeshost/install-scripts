@@ -1181,6 +1181,52 @@ beeshost_prisma_run_in_pg() {
   )
 }
 
+beeshost_pg_table_exists() {
+  local table="$1"
+  if [ -z "${DATABASE_URL:-}" ]; then
+    return 1
+  fi
+  psql "$DATABASE_URL" -tAc \
+    "SELECT 1 FROM information_schema.tables \
+     WHERE table_schema = 'public' AND table_name = '${table}' LIMIT 1;" \
+    2>/dev/null | grep -q '^1$'
+}
+
+# After a failed migrate deploy, mark migrations as applied when objects already exist (legacy db push).
+beeshost_prisma_migrate_auto_resolve() {
+  local pg="$1"
+  local prisma_bin="$2"
+  local resolved=0
+
+  beeshost_source_env || true
+  if [ -z "${DATABASE_URL:-}" ]; then
+    return 1
+  fi
+
+  if beeshost_pg_table_exists account_domains; then
+    info "  Schema has account_domains — marking 20260526_account_domains_hostnames applied"
+    if beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate resolve --applied "20260526_account_domains_hostnames"; then
+      resolved=1
+    fi
+  fi
+
+  if beeshost_pg_table_exists DnsZone; then
+    info "  Schema has DnsZone — marking 20260526_dns_zone_registry applied"
+    if beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate resolve --applied "20260526_dns_zone_registry"; then
+      resolved=1
+    fi
+  fi
+
+  if beeshost_pg_table_exists websites; then
+    info "  Schema has websites — marking 20260527_websites applied"
+    if beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate resolve --applied "20260527_websites"; then
+      resolved=1
+    fi
+  fi
+
+  [ "$resolved" -eq 1 ]
+}
+
 # Align Prisma schema without dropping PowerDNS zones or unrelated tables.
 beeshost_prisma_db_push() {
   local pg=/opt/beeshost/postgres
@@ -1207,13 +1253,22 @@ beeshost_prisma_db_push() {
 
   if beeshost_prisma_has_migrations "$pg"; then
     info "Applying Prisma migrations (migrate deploy — preserves pdns_* and existing rows)"
-    beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate deploy
-    schema_rc=$?
-    if [ "$schema_rc" -eq 0 ]; then
-      ok "  prisma migrate deploy completed"
-    else
+    local attempt=0
+    while [ "$attempt" -lt 4 ]; do
+      beeshost_prisma_run_in_pg "$pg" "$prisma_bin" migrate deploy
+      schema_rc=$?
+      if [ "$schema_rc" -eq 0 ]; then
+        ok "  prisma migrate deploy completed"
+        break
+      fi
+      if beeshost_prisma_migrate_auto_resolve "$pg" "$prisma_bin"; then
+        attempt=$((attempt + 1))
+        info "  Retrying migrate deploy after marking existing schema as applied (attempt ${attempt})"
+        continue
+      fi
       fail "  prisma migrate deploy failed (exit $schema_rc)"
-    fi
+      break
+    done
   else
     warn "  No prisma/migrations in $pg — migrate deploy skipped"
     schema_rc=1
