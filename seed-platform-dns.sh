@@ -37,11 +37,85 @@ fi
 
 section "Seed platform DNS for ${DOMAIN} → ${IP}"
 
-if ! curl -sk -H "X-API-Key: ${PDNS_API_KEY}" "${PDNS_URL}/api/v1/servers/localhost/zones/${DOMAIN}." \
-  | grep -q '"name"'; then
-  fail "PowerDNS zone ${DOMAIN}. not found — run fix-pdns.sh and ensure the zone exists"
+NS1="${NS1_HOSTNAME:-ns1.${DOMAIN}}"
+NS2="${NS2_HOSTNAME:-ns2.${DOMAIN}}"
+NS1="${NS1%.}."
+NS2="${NS2%.}."
+PDNS_ADMIN="${PDNS_ADMIN_EMAIL:-admin.${DOMAIN}}"
+PDNS_ADMIN="${PDNS_ADMIN%.}."
+SOA_SERIAL="$(date -u +%Y%m%d)01"
+
+pdns_zone_exists() {
+  curl -sk -H "X-API-Key: ${PDNS_API_KEY}" "${PDNS_URL}/api/v1/servers/localhost/zones/${DOMAIN}." \
+    | grep -q '"name"'
+}
+
+ensure_pdns_zone() {
+  if pdns_zone_exists; then
+    return 0
+  fi
+
+  info "Zone ${DOMAIN}. missing — creating NATIVE zone (NS ${NS1}, ${NS2})"
+  local create_body
+  create_body="$(cat <<EOF
+{
+  "name": "${DOMAIN}.",
+  "kind": "Native",
+  "nameservers": ["${NS1}", "${NS2}"],
+  "rrsets": [
+    {
+      "name": "${DOMAIN}.",
+      "type": "SOA",
+      "ttl": 3600,
+      "records": [{"content": "${NS1} ${PDNS_ADMIN} ${SOA_SERIAL} 3600 900 604800 300", "disabled": false}]
+    },
+    {
+      "name": "${DOMAIN}.",
+      "type": "NS",
+      "ttl": 3600,
+      "records": [{"content": "${NS1}", "disabled": false}]
+    },
+    {
+      "name": "${DOMAIN}.",
+      "type": "NS",
+      "ttl": 3600,
+      "records": [{"content": "${NS2}", "disabled": false}]
+    }
+  ]
+}
+EOF
+)"
+  local http_code
+  http_code="$(curl -sk -o /tmp/beeshost-pdns-create-zone.json -w '%{http_code}' \
+    -X POST \
+    -H "X-API-Key: ${PDNS_API_KEY}" \
+    -H "Content-Type: application/json" \
+    "${PDNS_URL}/api/v1/servers/localhost/zones" \
+    -d "${create_body}")"
+
+  if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
+    ok "Created PowerDNS zone ${DOMAIN}."
+    return 0
+  fi
+
+  if pdns_zone_exists; then
+    ok "Zone ${DOMAIN}. is present (create returned HTTP ${http_code})."
+    return 0
+  fi
+
+  fail "Could not create zone ${DOMAIN}. (HTTP ${http_code})"
+  if [ -f /tmp/beeshost-pdns-create-zone.json ]; then
+    info "PowerDNS response: $(tr '\n' ' ' </tmp/beeshost-pdns-create-zone.json | head -c 400)"
+  fi
+  echo ""
+  info "fix-pdns.sh only repairs the database schema — it does not create zones."
+  info "Alternatively seed via SQL (replace IP), then restart pdns:"
+  info "  sed 's/\\${SERVER_A_IP}/${IP}/g' /opt/beeshost/dns/setup/seed.sql | psql \"\$DATABASE_URL\""
+  info "  systemctl restart pdns"
   exit 1
-fi
+}
+
+ensure_pdns_zone
 
 upsert_a() {
   local host="$1"
